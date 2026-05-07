@@ -7,15 +7,21 @@ Requires Python 3.10+
 """
 import logging
 import json
-import queue
+import uuid
 import threading
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
-from flask import Flask, render_template, request, Response, stream_with_context
+from flask import Flask, render_template, request, jsonify
 import yfinance as yf
+
+# ── In-memory job store ─────────────────────────────────────────────────────────
+# { job_id: { "status": "running"|"done"|"error",
+#             "processed": int, "total": int,
+#             "log": [...], "results": [...] } }
+JOBS: dict = {}
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -246,15 +252,17 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/scan")
-def scan():
-    min_mktcap       = float(request.args.get("min_market_cap",    20))  * 1e9
-    min_dte          = int(  request.args.get("min_days_to_exp",   30))
-    max_dte          = int(  request.args.get("days_to_exp",       60))
-    iv_hv_thr        = float(request.args.get("iv_hv_threshold",  1.3))
-    iv_min           = float(request.args.get("iv_min",            30))  / 100
-    only_undervalued = request.args.get("only_undervalued", "true").lower() == "true"
-    custom_raw       =       request.args.get("custom_tickers",    "")
+@app.route("/api/scan/start", methods=["POST"])
+def scan_start():
+    data = request.get_json(force=True, silent=True) or {}
+
+    min_mktcap       = float(data.get("min_market_cap",    20))  * 1e9
+    min_dte          = int(  data.get("min_days_to_exp",   30))
+    max_dte          = int(  data.get("days_to_exp",       60))
+    iv_hv_thr        = float(data.get("iv_hv_threshold",  1.3))
+    iv_min           = float(data.get("iv_min",            30))  / 100
+    only_undervalued = str(  data.get("only_undervalued", "true")).lower() == "true"
+    custom_raw       =       data.get("custom_tickers",    "")
 
     tickers = list(DEFAULT_TICKERS)
     if custom_raw:
@@ -263,17 +271,24 @@ def scan():
             for t in custom_raw.replace(";", ",").split(",")
             if t.strip()
         ]
-        # Custom tickers first, de-duplicated
         tickers = list(dict.fromkeys(extras + tickers))
 
-    total = len(tickers)
-    q: queue.Queue = queue.Queue()
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {
+        "status":    "running",
+        "processed": 0,
+        "total":     len(tickers),
+        "log":       [],
+        "results":   [],
+    }
 
     def worker():
+        job = JOBS[job_id]
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             future_map = {
                 pool.submit(
-                    process_ticker, sym, min_mktcap, min_dte, max_dte, iv_hv_thr, iv_min, only_undervalued
+                    process_ticker, sym, min_mktcap, min_dte, max_dte,
+                    iv_hv_thr, iv_min, only_undervalued
                 ): sym
                 for sym in tickers
             }
@@ -283,54 +298,39 @@ def scan():
                     res = fut.result(timeout=45)
                 except Exception:
                     res = []
-                q.put({"sym": sym, "results": res})
-        q.put(None)  # sentinel — scan finished
+                job["processed"] += 1
+                job["results"].extend(res)
+                job["log"].append({
+                    "sym":   sym,
+                    "found": len(res),
+                    "pct":   round(job["processed"] / job["total"] * 100),
+                })
+
+        # Sort and mark done
+        job["results"].sort(
+            key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+            reverse=True,
+        )
+        job["status"] = "done"
 
     threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"job_id": job_id, "total": len(tickers)})
 
-    def generate():
-        all_results = []
-        processed   = 0
 
-        while True:
-            try:
-                item = q.get(timeout=10)  # 10s timeout → send heartbeat
-            except queue.Empty:
-                if threading.active_count() > 1:
-                    # Worker still running — send SSE comment as keepalive
-                    yield ": ping\n\n"
-                    continue
-                else:
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Scan timed out'})}\n\n"
-                    return
-
-            if item is None:
-                # All done — sort by IV/HV ratio descending
-                all_results.sort(
-                    key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-                    reverse=True,
-                )
-                yield (
-                    f"data: {json.dumps({'type': 'complete', 'results': all_results, 'count': len(all_results), 'scanned': total})}\n\n"
-                )
-                return
-
-            processed += 1
-            found = item["results"]
-            all_results.extend(found)
-            yield (
-                f"data: {json.dumps({'type': 'progress', 'ticker': item['sym'], 'processed': processed, 'total': total, 'found': len(found), 'total_found': len(all_results), 'pct': round(processed / total * 100)})}\n\n"
-            )
-
-    return Response(
-        stream_with_context(generate()),
-        content_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
-    )
+@app.route("/api/scan/status/<job_id>")
+def scan_status(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify({
+        "status":    job["status"],
+        "processed": job["processed"],
+        "total":     job["total"],
+        "pct":       round(job["processed"] / job["total"] * 100) if job["total"] else 0,
+        "log":       job["log"][-30:],   # last 30 log entries
+        "count":     len(job["results"]),
+        "results":   job["results"] if job["status"] == "done" else [],
+    })
 
 
 if __name__ == "__main__":

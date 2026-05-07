@@ -481,7 +481,9 @@
 
   let dataTable   = null;
   let allResults  = [];
-  let evtSrc      = null;
+  let pollTimer   = null;
+  let currentJob  = null;
+  let seenLogs    = 0;
 
   // ── Toggle "How it works" ────────────────────────────────────────────────────
   function toggleHow() {
@@ -495,9 +497,9 @@
 
   // ── Start scan ───────────────────────────────────────────────────────────────
   function startScan() {
-    if (evtSrc) { evtSrc.close(); evtSrc = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 
-    const params = new URLSearchParams({
+    const body = {
       min_market_cap:   document.getElementById('minMarketCap').value,
       min_days_to_exp:  document.getElementById('minDaysToExp').value,
       days_to_exp:      document.getElementById('daysToExp').value,
@@ -505,7 +507,7 @@
       iv_hv_threshold:  document.getElementById('ivHvThreshold').value,
       custom_tickers:   document.getElementById('customTickers').value,
       only_undervalued: document.getElementById('onlyUndervalued').checked,
-    });
+    };
 
     // Reset UI
     setBtnScanning(true);
@@ -513,53 +515,73 @@
     document.getElementById('scanLog').innerHTML   = '';
     document.getElementById('progressBar').style.width = '0%';
     document.getElementById('liveDot').classList.remove('d-none');
-
     if (dataTable) { dataTable.destroy(); dataTable = null; }
     document.getElementById('resultsBody').innerHTML = '';
-    allResults = [];
+    allResults  = [];
+    seenLogs    = 0;
+    currentJob  = null;
 
-    evtSrc = new EventSource('/api/scan?' + params.toString());
-
-    evtSrc.onmessage = e => {
-      const d = JSON.parse(e.data);
-      if      (d.type === 'progress') onProgress(d);
-      else if (d.type === 'complete') onComplete(d);
-      else if (d.type === 'error')    onError(d.message);
-    };
-
-    evtSrc.onerror = () => {
-      if (evtSrc.readyState !== EventSource.CLOSED) onError('Connection lost. Please try again.');
-    };
+    fetch('/api/scan/start', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    })
+    .then(r => r.json())
+    .then(data => {
+      currentJob = data.job_id;
+      pollTimer  = setInterval(pollStatus, 2000);
+    })
+    .catch(() => onError('Failed to start scan. Please try again.'));
   }
 
-  // ── Progress event ───────────────────────────────────────────────────────────
-  function onProgress(d) {
-    document.getElementById('progressBar').style.width = d.pct + '%';
-    document.getElementById('progText').textContent    = 'Scanning ' + d.ticker + '…';
-    document.getElementById('progStats').textContent   = `${d.processed} / ${d.total}  ·  Found: ${d.total_found}`;
+  // ── Poll status ───────────────────────────────────────────────────────────────
+  function pollStatus() {
+    if (!currentJob) return;
+    fetch('/api/scan/status/' + currentJob)
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) { onError(d.error); return; }
 
-    const log   = document.getElementById('scanLog');
-    const entry = document.createElement('div');
-    entry.className = d.found > 0 ? 'log-ok' : 'log-nil';
-    entry.textContent = (d.found > 0 ? '✔ ' : '· ') +
-      d.ticker.padEnd(6, ' ') + '  ' +
-      (d.found > 0 ? d.found + ' anomaly/ies found' : 'none / filtered');
-    log.appendChild(entry);
-    log.scrollTop = log.scrollHeight;
+        // Update progress bar
+        document.getElementById('progressBar').style.width = d.pct + '%';
+        document.getElementById('progStats').textContent =
+          `${d.processed} / ${d.total}  ·  Found: ${d.count}`;
+
+        // Append new log entries
+        const log     = document.getElementById('scanLog');
+        const newLogs = d.log.slice(seenLogs);
+        seenLogs      = d.log.length;
+        newLogs.forEach(entry => {
+          const el = document.createElement('div');
+          el.className  = entry.found > 0 ? 'log-ok' : 'log-nil';
+          el.textContent = (entry.found > 0 ? '✔ ' : '· ') +
+            entry.sym.padEnd(6, ' ') + '  ' +
+            (entry.found > 0 ? entry.found + ' anomaly/ies found' : 'none / filtered');
+          log.appendChild(el);
+          log.scrollTop = log.scrollHeight;
+        });
+        if (d.processed > 0) {
+          document.getElementById('progText').textContent =
+            d.status === 'done' ? 'Scan complete!' : 'Scanning…';
+        }
+
+        if (d.status === 'done') {
+          clearInterval(pollTimer); pollTimer = null;
+          onComplete(d);
+        }
+      })
+      .catch(() => { /* transient error, retry next tick */ });
   }
 
   // ── Scan complete ────────────────────────────────────────────────────────────
   function onComplete(d) {
-    evtSrc.close();
     allResults = d.results;
-
     setBtnScanning(false);
     hide('progressPanel');
     document.getElementById('liveDot').classList.add('d-none');
 
-    // Stats
     show('statsRow');
-    document.getElementById('statScanned').textContent = d.scanned;
+    document.getElementById('statScanned').textContent = d.total;
     document.getElementById('statFound').textContent   = d.count;
 
     if (d.results.length) {
@@ -577,7 +599,7 @@
 
   // ── Error ────────────────────────────────────────────────────────────────────
   function onError(msg) {
-    evtSrc && evtSrc.close();
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     setBtnScanning(false);
     hide('progressPanel');
     document.getElementById('liveDot').classList.add('d-none');
@@ -645,7 +667,7 @@
 
     dataTable = new DataTable('#resultsTable', {
       pageLength: 25,
-      order:      [[10, 'desc']],    // default: sort by IV/HV ratio desc
+      order:      [[12, 'desc']],    // sort by IV/HV ratio desc
       responsive: false,
       dom: '<"row mb-2 px-3"<"col-sm-6"l><"col-sm-6"f>>tip',
       columnDefs: [
@@ -660,14 +682,15 @@
     if (!allResults.length) return;
 
     const headers = [
-      'Ticker','Company','Market Cap (B$)','Current Price','Strike',
-      'Moneyness %','Expiry','DTE','IV %','HV %','IV/HV Ratio',
+      'Ticker','Company','Market Cap (B$)','Current Price','Analyst Target','Upside %',
+      'Strike','Moneyness %','Expiry','DTE','IV %','HV %','IV/HV Ratio',
       'Bid','Ask','Mid','Premium %','Ann Premium %','Volume','Open Interest',
     ];
 
     const rows = allResults.map(r => [
-      r.ticker, `"${r.company}"`, r.market_cap_b, r.current_price, r.strike,
-      r.moneyness_pct, r.exp_date, r.dte, r.iv, r.hv ?? '', r.iv_hv_ratio ?? '',
+      r.ticker, `"${r.company}"`, r.market_cap_b, r.current_price,
+      r.analyst_target ?? '', r.upside_pct ?? '',
+      r.strike, r.moneyness_pct, r.exp_date, r.dte, r.iv, r.hv ?? '', r.iv_hv_ratio ?? '',
       r.bid, r.ask, r.mid, r.premium_pct, r.ann_premium_pct, r.volume, r.open_interest,
     ]);
 
