@@ -1,0 +1,334 @@
+"""
+Put Option Anomaly Scanner
+Detects sell put opportunities where IV is significantly higher than HV
+(options priced expensively vs realized volatility — good for option sellers).
+
+Requires Python 3.10+
+"""
+import logging
+import json
+import queue
+import threading
+import concurrent.futures
+from datetime import datetime, timedelta
+from typing import Optional
+
+import numpy as np
+from flask import Flask, render_template, request, Response, stream_with_context
+import yfinance as yf
+
+logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# ── Default ticker universe (S&P 100 + high-beta names) ────────────────────────
+DEFAULT_TICKERS = [
+    # Mega-cap tech
+    "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "AVGO",
+    # Financials
+    "JPM", "BAC", "WFC", "GS", "MS", "BLK", "AXP", "SCHW", "C", "PNC",
+    # Healthcare
+    "UNH", "LLY", "JNJ", "MRK", "ABBV", "TMO", "ABT", "MDT", "AMGN",
+    "GILD", "REGN", "VRTX", "SYK", "BSX", "ZTS", "CVS", "ELV", "CI", "HUM",
+    # Consumer
+    "WMT", "HD", "COST", "MCD", "PEP", "KO", "PG", "PM", "MO", "TJX",
+    "SBUX", "LOW", "NKE", "BKNG",
+    # Energy
+    "XOM", "CVX",
+    # Industrials
+    "CAT", "DE", "BA", "GE", "RTX", "HON", "ETN", "ITW", "MMM", "EMR", "UPS",
+    # Tech
+    "CRM", "ADBE", "ORCL", "INTU", "CSCO", "IBM", "TXN", "AMD", "INTC",
+    "PANW", "KLAC", "LRCX", "SNPS", "NOW", "ISRG", "ACN",
+    # Growth / High-beta
+    "NFLX", "UBER", "ABNB", "CRWD", "PLTR", "COIN", "ARM", "SNOW",
+    # Other large-cap
+    "V", "MA", "BRK-B", "LIN", "SPGI", "CME", "ICE", "MMC", "ADP",
+    "NEE", "SO", "DUK", "PLD", "CB",
+]
+
+
+def calculate_hv(ticker_obj: yf.Ticker, window: int = 30) -> Optional[float]:
+    """Annualized historical volatility over `window` trading days."""
+    try:
+        hist = ticker_obj.history(period="6mo", auto_adjust=True)
+        if len(hist) < window + 5:
+            return None
+        log_ret = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
+        hv = float(log_ret.rolling(window).std().iloc[-1]) * np.sqrt(252)
+        return None if np.isnan(hv) else hv
+    except Exception:
+        return None
+
+
+def process_ticker(
+    sym: str,
+    min_mktcap: float,
+    min_dte: int,
+    max_dte: int,
+    iv_hv_thr: float,
+    iv_min: float,
+    only_undervalued: bool = False,
+) -> list:
+    """Return list of anomalous put records for one ticker."""
+    results = []
+    try:
+        tk = yf.Ticker(sym)
+
+        # ── Market cap check ──────────────────────────────────────────────────
+        mktcap = None
+        try:
+            mktcap = tk.fast_info.market_cap
+        except Exception:
+            pass
+        if not mktcap:
+            try:
+                mktcap = (tk.info or {}).get("marketCap", 0)
+            except Exception:
+                return results
+
+        if not mktcap or mktcap < min_mktcap:
+            return results
+
+        # ── Basic info ────────────────────────────────────────────────────────
+        try:
+            info = tk.info or {}
+            company = info.get("longName") or info.get("shortName", sym)
+            price = (
+                info.get("currentPrice")
+                or info.get("regularMarketPrice")
+                or 0
+            )
+        except Exception:
+            company = sym
+            try:
+                price = tk.fast_info.last_price or 0
+            except Exception:
+                return results
+
+        if not price or price <= 0:
+            return results
+
+        mktcap_b = round(mktcap / 1e9, 1)
+
+        # ── Undervalued check ─────────────────────────────────────────────────
+        analyst_target = None
+        upside_pct     = None
+        try:
+            analyst_target = info.get("targetMeanPrice") or info.get("targetMedianPrice")
+            if analyst_target and price > 0:
+                upside_pct = round((analyst_target - price) / price * 100, 1)
+        except Exception:
+            pass
+
+        if only_undervalued:
+            pe  = info.get("trailingPE") or info.get("forwardPE")
+            pb  = info.get("priceToBook")
+            peg = info.get("pegRatio")
+            has_upside  = upside_pct is not None and upside_pct > 5
+            low_pe      = pe  is not None and pe  < 20
+            low_pb      = pb  is not None and pb  < 1.5
+            low_peg     = peg is not None and peg < 1.0
+            if not (has_upside or low_pe or low_pb or low_peg):
+                return results
+
+        # ── Historical volatility ─────────────────────────────────────────────
+        hv = calculate_hv(tk)
+
+        # ── Option expiration dates within max_dte ────────────────────────────
+        try:
+            all_dates = tk.options  # tuple of 'YYYY-MM-DD'
+        except Exception:
+            return results
+
+        if not all_dates:
+            return results
+
+        now = datetime.now()
+        floor  = now + timedelta(days=min_dte)
+        cutoff = now + timedelta(days=max_dte)
+
+        valid = []
+        for d in all_dates:
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d")
+                if floor <= dt <= cutoff:
+                    valid.append((d, dt))
+            except ValueError:
+                pass
+
+        if not valid:
+            return results
+
+        # ── Iterate over valid expirations ────────────────────────────────────
+        for exp_str, exp_dt in valid:
+            try:
+                chain = tk.option_chain(exp_str)
+                puts = chain.puts.copy()
+            except Exception:
+                continue
+
+            if puts.empty:
+                continue
+
+            dte = max(1, (exp_dt - now).days)
+
+            # Only strikes from 70 % to 105 % of current price
+            puts = puts[
+                (puts["strike"] >= price * 0.70) & (puts["strike"] <= price * 1.05)
+            ]
+
+            for _, row in puts.iterrows():
+                iv_raw = row.get("impliedVolatility")
+                if iv_raw is None:
+                    continue
+                iv = float(iv_raw)
+                if np.isnan(iv) or iv < iv_min:
+                    continue
+
+                iv_hv_ratio = (iv / hv) if (hv and hv > 0) else None
+
+                # Anomaly: IV/HV exceeds threshold, OR IV is extreme (≥ 70 %)
+                is_anomaly = (
+                    iv_hv_ratio is not None and iv_hv_ratio >= iv_hv_thr
+                ) or iv >= 0.70
+
+                if not is_anomaly:
+                    continue
+
+                bid  = float(row.get("bid",       0) or 0)
+                ask  = float(row.get("ask",       0) or 0)
+                last = float(row.get("lastPrice", 0) or 0)
+                mid  = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
+
+                strike          = float(row["strike"])
+                premium_pct     = (mid / strike * 100) if strike > 0 else 0
+                ann_premium_pct = (premium_pct * 365 / dte) if dte > 0 else 0
+                moneyness_pct   = (strike - price) / price * 100
+
+                results.append(
+                    {
+                        "ticker":          sym,
+                        "company":         company,
+                        "market_cap_b":    mktcap_b,
+                        "current_price":   round(price,  2),
+                        "analyst_target":  round(analyst_target, 2) if analyst_target else None,
+                        "upside_pct":      upside_pct,
+                        "strike":          strike,
+                        "exp_date":        exp_str,
+                        "dte":             dte,
+                        "iv":              round(iv * 100, 1),
+                        "hv":              round(hv * 100, 1) if hv else None,
+                        "iv_hv_ratio":     round(iv_hv_ratio, 2) if iv_hv_ratio else None,
+                        "bid":             round(bid,  2),
+                        "ask":             round(ask,  2),
+                        "mid":             round(mid,  2),
+                        "volume":          int(row.get("volume",       0) or 0),
+                        "open_interest":   int(row.get("openInterest", 0) or 0),
+                        "premium_pct":     round(premium_pct,     2),
+                        "ann_premium_pct": round(ann_premium_pct, 1),
+                        "moneyness_pct":   round(moneyness_pct,   1),
+                    }
+                )
+
+    except Exception:
+        pass
+
+    return results
+
+
+# ── Flask routes ────────────────────────────────────────────────────────────────
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/scan")
+def scan():
+    min_mktcap       = float(request.args.get("min_market_cap",    20))  * 1e9
+    min_dte          = int(  request.args.get("min_days_to_exp",   30))
+    max_dte          = int(  request.args.get("days_to_exp",       60))
+    iv_hv_thr        = float(request.args.get("iv_hv_threshold",  1.3))
+    iv_min           = float(request.args.get("iv_min",            30))  / 100
+    only_undervalued = request.args.get("only_undervalued", "true").lower() == "true"
+    custom_raw       =       request.args.get("custom_tickers",    "")
+
+    tickers = list(DEFAULT_TICKERS)
+    if custom_raw:
+        extras = [
+            t.strip().upper()
+            for t in custom_raw.replace(";", ",").split(",")
+            if t.strip()
+        ]
+        # Custom tickers first, de-duplicated
+        tickers = list(dict.fromkeys(extras + tickers))
+
+    total = len(tickers)
+    q: queue.Queue = queue.Queue()
+
+    def worker():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            future_map = {
+                pool.submit(
+                    process_ticker, sym, min_mktcap, min_dte, max_dte, iv_hv_thr, iv_min, only_undervalued
+                ): sym
+                for sym in tickers
+            }
+            for fut in concurrent.futures.as_completed(future_map):
+                sym = future_map[fut]
+                try:
+                    res = fut.result(timeout=45)
+                except Exception:
+                    res = []
+                q.put({"sym": sym, "results": res})
+        q.put(None)  # sentinel — scan finished
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def generate():
+        all_results = []
+        processed   = 0
+
+        while True:
+            try:
+                item = q.get(timeout=120)
+            except queue.Empty:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Scan timed out'})}\n\n"
+                return
+
+            if item is None:
+                # All done — sort by IV/HV ratio descending
+                all_results.sort(
+                    key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+                    reverse=True,
+                )
+                yield (
+                    f"data: {json.dumps({'type': 'complete', 'results': all_results, 'count': len(all_results), 'scanned': total})}\n\n"
+                )
+                return
+
+            processed += 1
+            found = item["results"]
+            all_results.extend(found)
+            yield (
+                f"data: {json.dumps({'type': 'progress', 'ticker': item['sym'], 'processed': processed, 'total': total, 'found': len(found), 'total_found': len(all_results), 'pct': round(processed / total * 100)})}\n\n"
+            )
+
+    return Response(
+        stream_with_context(generate()),
+        content_type="text/event-stream",
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection":        "keep-alive",
+        },
+    )
+
+
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=False, use_reloader=False, port=port, threaded=True)

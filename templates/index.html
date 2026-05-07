@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Put Option Anomaly Scanner</title>
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <!-- DataTables + Bootstrap 5 skin -->
+  <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet" />
+  <!-- Font Awesome -->
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet" />
+
+  <style>
+    /* ── Design tokens ───────────────────────────────────────────────────── */
+    :root {
+      --bg0:      #070d1a;
+      --bg1:      #0d1526;
+      --bg2:      #121e33;
+      --bg3:      #192540;
+      --border:   #1f3050;
+      --txt1:     #dce8ff;
+      --txt2:     #7a97c0;
+      --green:    #10e89a;
+      --red:      #ff4d6a;
+      --yellow:   #ffb347;
+      --blue:     #4d9fff;
+      --purple:   #a78bfa;
+      --cyan:     #22d3ee;
+    }
+
+    /* ── Base ────────────────────────────────────────────────────────────── */
+    *  { box-sizing: border-box; }
+    body { background: var(--bg0); color: var(--txt1); font-family: 'Segoe UI', system-ui, sans-serif; min-height: 100vh; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track  { background: var(--bg1); }
+    ::-webkit-scrollbar-thumb  { background: var(--border); border-radius: 3px; }
+
+    /* ── Navbar ──────────────────────────────────────────────────────────── */
+    .topbar {
+      background: var(--bg1);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .topbar-brand { font-size: 1.1rem; font-weight: 700; letter-spacing: .03em; color: var(--txt1); }
+    .topbar-brand .icon { color: var(--blue); margin-right: 8px; }
+    .topbar-sub  { font-size: .75rem; color: var(--txt2); }
+    .live-dot    { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 6px; animation: blink 1.4s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    /* ── Cards ───────────────────────────────────────────────────────────── */
+    .panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      margin-bottom: 18px;
+    }
+    .panel-head {
+      padding: 12px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .85rem;
+      font-weight: 600;
+      color: var(--txt2);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+    .panel-head .icon { color: var(--blue); }
+    .panel-body { padding: 18px 20px; }
+
+    /* ── Form controls ───────────────────────────────────────────────────── */
+    .form-label  { font-size: .72rem; color: var(--txt2); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 5px; }
+    .form-control, .form-select {
+      background: var(--bg1);
+      border: 1px solid var(--border);
+      color: var(--txt1);
+      font-size: .85rem;
+      border-radius: 8px;
+    }
+    .form-control:focus, .form-select:focus {
+      background: var(--bg1);
+      border-color: var(--blue);
+      color: var(--txt1);
+      box-shadow: 0 0 0 3px rgba(77,159,255,.15);
+    }
+    .form-control::placeholder { color: var(--txt2); }
+
+    /* ── Scan button ─────────────────────────────────────────────────────── */
+    .btn-scan {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      border: none;
+      color: #fff;
+      font-weight: 700;
+      border-radius: 10px;
+      padding: 10px 28px;
+      font-size: .9rem;
+      transition: transform .15s, box-shadow .15s;
+      width: 100%;
+    }
+    .btn-scan:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(124,58,237,.35); color: #fff; }
+    .btn-scan:disabled { opacity: .55; }
+
+    /* ── Progress ────────────────────────────────────────────────────────── */
+    .progress { background: var(--bg1); border-radius: 8px; height: 6px; }
+    .progress-bar { background: linear-gradient(90deg, var(--blue), var(--purple)); border-radius: 8px; transition: width .4s ease; }
+
+    .scan-log {
+      height: 90px; overflow-y: auto;
+      background: var(--bg1); border: 1px solid var(--border);
+      border-radius: 8px; padding: 8px 10px;
+      font-family: 'Consolas', monospace; font-size: .73rem; color: var(--txt2);
+    }
+    .log-ok  { color: var(--green); }
+    .log-nil { color: #3a5070; }
+
+    /* ── Stat cards ──────────────────────────────────────────────────────── */
+    .stat-card {
+      background: var(--bg3); border: 1px solid var(--border);
+      border-radius: 10px; padding: 14px 16px; text-align: center;
+    }
+    .stat-value { font-size: 1.6rem; font-weight: 800; color: var(--blue); line-height: 1; }
+    .stat-label { font-size: .68rem; color: var(--txt2); text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+
+    /* ── Table ───────────────────────────────────────────────────────────── */
+    table.dataTable thead th {
+      background: var(--bg1);
+      color: var(--txt2);
+      border-bottom: 1px solid var(--border) !important;
+      font-size: .7rem; text-transform: uppercase; letter-spacing: .06em;
+      white-space: nowrap; padding: 10px 12px;
+    }
+    table.dataTable tbody tr { background: var(--bg2); border-bottom: 1px solid var(--border); }
+    table.dataTable tbody tr:hover td { background: rgba(77,159,255,.07) !important; }
+    table.dataTable tbody td { color: var(--txt1); font-size: .82rem; padding: 8px 12px; white-space: nowrap; vertical-align: middle; }
+
+    /* DT controls */
+    #resultsTable_wrapper .dataTables_filter input,
+    #resultsTable_wrapper .dataTables_length select {
+      background: var(--bg1); border: 1px solid var(--border); color: var(--txt1); border-radius: 6px;
+    }
+    #resultsTable_wrapper .dataTables_info { color: var(--txt2); font-size: .75rem; }
+    #resultsTable_wrapper .dataTables_paginate .paginate_button { color: var(--txt2) !important; border-radius: 6px !important; }
+    #resultsTable_wrapper .dataTables_paginate .paginate_button.current,
+    #resultsTable_wrapper .dataTables_paginate .paginate_button:hover {
+      background: var(--blue) !important; border-color: var(--blue) !important; color: #fff !important;
+    }
+
+    /* ── Badges / color helpers ──────────────────────────────────────────── */
+    .ticker-lnk { font-weight: 700; color: var(--cyan); text-decoration: none; }
+    .ticker-lnk:hover { color: var(--blue); }
+
+    .iv-badge {
+      display: inline-block; padding: 2px 7px; border-radius: 5px;
+      font-weight: 700; font-size: .78rem;
+    }
+    .iv-extreme { background: rgba(255,77,106,.18); color: var(--red);    border: 1px solid rgba(255,77,106,.3); }
+    .iv-high    { background: rgba(255,179,71,.18); color: var(--yellow); border: 1px solid rgba(255,179,71,.3); }
+    .iv-medium  { background: rgba(77,159,255,.18); color: var(--blue);   border: 1px solid rgba(77,159,255,.3); }
+
+    .ratio-badge {
+      display: inline-block; padding: 2px 7px; border-radius: 5px;
+      font-weight: 800; font-size: .82rem;
+    }
+    .ratio-extreme { background: rgba(255,77,106,.2);  color: var(--red);    border: 1px solid rgba(255,77,106,.4); }
+    .ratio-high    { background: rgba(255,179,71,.2);  color: var(--yellow); border: 1px solid rgba(255,179,71,.4); }
+    .ratio-med     { background: rgba(77,159,255,.2);  color: var(--blue);   border: 1px solid rgba(77,159,255,.4); }
+
+    .pos { color: var(--green); }
+    .neg { color: var(--red);   }
+    .muted { color: var(--txt2); }
+
+    /* ── Legend ──────────────────────────────────────────────────────────── */
+    .legend-item { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 8px; }
+    .legend-dot  { width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+
+    /* ── Override Bootstrap table white bg inside panels ─────────────────── */
+    .panel .table,
+    .panel .table > :not(caption) > * > * {
+      background-color: transparent;
+      color: var(--txt1);
+    }
+    .panel .table thead th,
+    .panel .table tbody td {
+      border-color: var(--border) !important;
+    }
+    .panel .table tbody tr:hover td {
+      background-color: rgba(77,159,255,.07) !important;
+    }
+
+    /* ── Empty state ─────────────────────────────────────────────────────── */
+    #emptyState { padding: 60px 20px; text-align: center; }
+    #emptyState .bi-icon { font-size: 3.5rem; color: var(--border); margin-bottom: 16px; }
+
+    /* ── Export btn ──────────────────────────────────────────────────────── */
+    .btn-export {
+      background: transparent; border: 1px solid var(--border); color: var(--txt2);
+      font-size: .78rem; border-radius: 7px; padding: 5px 14px;
+      transition: border-color .15s, color .15s;
+    }
+    .btn-export:hover { border-color: var(--blue); color: var(--blue); }
+
+    /* ── Tooltip override ────────────────────────────────────────────────── */
+    [data-bs-toggle="tooltip"] { cursor: help; }
+  </style>
+</head>
+
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────────────────────────────── -->
+<div class="topbar">
+  <div>
+    <span class="topbar-brand">
+      <span class="icon"><i class="fas fa-chart-line"></i></span>
+      Put Option Anomaly Scanner
+    </span>
+    <span class="ms-3 topbar-sub">Sell-put opportunity detector &bull; IV/HV analysis</span>
+  </div>
+  <div id="liveDot" class="topbar-sub d-none">
+    <span class="live-dot"></span>Scanning…
+  </div>
+</div>
+
+<!-- ── Main container ───────────────────────────────────────────────────────── -->
+<div class="container-fluid px-3 px-md-4 py-4" style="max-width:1800px">
+
+  <!-- ── Scan parameters ────────────────────────────────────────────────────── -->
+  <div class="panel">
+    <div class="panel-head"><i class="fas fa-sliders icon"></i>Scan Parameters</div>
+    <div class="panel-body">
+      <div class="row g-3 align-items-end">
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">
+            Min Market Cap (B$)
+            <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+               title="Only scan stocks with market cap above this value (in Billions USD)"></i>
+          </label>
+          <input type="number" id="minMarketCap" class="form-control" value="20" min="1" max="10000">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">
+            Min Days to Expiry
+            <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+               title="Exclude options expiring sooner than this many days (e.g. 7 = skip weekly options)"></i>
+          </label>
+          <input type="number" id="minDaysToExp" class="form-control" value="30" min="0" max="90">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">
+            Max Days to Expiry
+            <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+               title="Show put options expiring within this many days (e.g. 30 = monthly options)"></i>
+          </label>
+          <input type="number" id="daysToExp" class="form-control" value="60" min="1" max="180">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">
+            Min IV %
+            <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+               title="Minimum Implied Volatility to show. 30 = 30% annualized IV"></i>
+          </label>
+          <input type="number" id="ivMin" class="form-control" value="30" min="5" max="300">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">
+            IV / HV Threshold
+            <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+               title="Show options where IV ÷ Historical Volatility exceeds this. ≥1.3 means options cost 30% more than recent realized movement — great for sellers."></i>
+          </label>
+          <input type="number" id="ivHvThreshold" class="form-control" value="1.3" min="1.0" max="10" step="0.1">
+        </div>
+
+        <div class="col-12 col-md-2">
+          <label class="form-label">
+            Custom Tickers
+            <span class="text-secondary">(optional, comma-separated)</span>
+          </label>
+          <input type="text" id="customTickers" class="form-control" placeholder="e.g. AAPL, SPY, QQQ">
+        </div>
+
+        <div class="col-12 col-md-2 d-flex align-items-end pb-1">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="onlyUndervalued" checked>
+            <label class="form-check-label" for="onlyUndervalued" style="font-size:.82rem;color:var(--txt1);cursor:pointer">
+              Only Undervalued
+              <i class="fas fa-circle-info text-secondary ms-1" data-bs-toggle="tooltip"
+                 title="Filter only stocks trading below analyst consensus target price (>5% upside), or with low P/E (<20), P/B (<1.5), or PEG (<1.0). Data from Yahoo Finance."></i>
+            </label>
+          </div>
+        </div>
+
+        <div class="col-12 col-md-1">
+          <button id="scanBtn" class="btn btn-scan" onclick="startScan()">
+            <i class="fas fa-search me-1"></i> Scan
+          </button>
+        </div>
+
+      </div><!-- row -->
+    </div><!-- panel-body -->
+  </div><!-- panel -->
+
+  <!-- ── How it works ───────────────────────────────────────────────────────── -->
+  <div class="panel" id="howItWorks">
+    <div class="panel-head" style="cursor:pointer" onclick="toggleHow()">
+      <i class="fas fa-circle-question icon"></i>How This Works
+      <i class="fas fa-chevron-down ms-auto" id="howChevron"></i>
+    </div>
+    <div class="panel-body" id="howBody">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <p class="small text-secondary mb-2">
+            <strong class="text-white">Anomaly = options priced expensively relative to actual recent volatility.</strong><br>
+            When IV is much higher than HV it means the market is pricing in large moves that historically haven't materialized —
+            creating an edge for option sellers.
+          </p>
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--blue)"></div>
+            <div class="small"><strong>IV % (Implied Volatility)</strong> — annualized vol priced into the option right now.</div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--txt2)"></div>
+            <div class="small"><strong>HV % (Historical Volatility)</strong> — actual 30-day realized price movement, annualized.</div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--yellow)"></div>
+            <div class="small"><strong>IV/HV Ratio</strong> — the key anomaly metric. ≥ 1.3 = options cost ≥30% more than realized vol.</div>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background:var(--green)"></div>
+            <div class="small"><strong>Ann. Premium %</strong> — annualized return if you collect this premium. Higher = better for sellers.</div>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <table class="table table-sm small" style="color:var(--txt1)">
+            <thead><tr style="color:var(--txt2); border-bottom:1px solid var(--border)">
+              <th>IV/HV Badge</th><th>Meaning</th><th>Signal</th>
+            </tr></thead>
+            <tbody>
+              <tr><td><span class="ratio-badge ratio-extreme">≥ 2.0×</span></td>
+                  <td>Extreme overpricing</td><td class="pos">Very strong sell signal</td></tr>
+              <tr><td><span class="ratio-badge ratio-high">1.5 – 2.0×</span></td>
+                  <td>High overpricing</td><td class="pos">Strong sell signal</td></tr>
+              <tr><td><span class="ratio-badge ratio-med">1.3 – 1.5×</span></td>
+                  <td>Moderate overpricing</td><td style="color:var(--blue)">Moderate sell signal</td></tr>
+            </tbody>
+          </table>
+          <p class="small text-secondary mt-2">
+            <i class="fas fa-triangle-exclamation text-warning me-1"></i>
+            <strong>Disclaimer:</strong> This tool is for educational/research use only.
+            Options trading involves significant risk. Always do your own due diligence.
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Progress ───────────────────────────────────────────────────────────── -->
+  <div class="panel d-none" id="progressPanel">
+    <div class="panel-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <span class="small fw-semibold" id="progText">Initializing…</span>
+        <span class="small muted" id="progStats">0 / 0</span>
+      </div>
+      <div class="progress mb-3">
+        <div id="progressBar" class="progress-bar" style="width:0%"></div>
+      </div>
+      <div id="scanLog" class="scan-log"></div>
+    </div>
+  </div>
+
+  <!-- ── Stats row ──────────────────────────────────────────────────────────── -->
+  <div class="row g-3 mb-3 d-none" id="statsRow">
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" id="statScanned">0</div>
+        <div class="stat-label">Stocks Scanned</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" id="statFound">0</div>
+        <div class="stat-label">Anomalies Found</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" id="statTopIV" style="color:var(--red)">—</div>
+        <div class="stat-label">Highest IV</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="stat-card">
+        <div class="stat-value" id="statTopRatio" style="color:var(--yellow)">—</div>
+        <div class="stat-label">Top IV / HV Ratio</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Results table ──────────────────────────────────────────────────────── -->
+  <div class="panel d-none" id="resultsPanel">
+    <div class="panel-head">
+      <i class="fas fa-fire icon" style="color:var(--yellow)"></i>
+      Anomalous Put Options
+      <span class="badge ms-1" id="resultBadge"
+            style="background:var(--blue);color:#fff;font-size:.7rem">0</span>
+      <button class="btn-export ms-auto" onclick="exportCSV()">
+        <i class="fas fa-download me-1"></i>Export CSV
+      </button>
+    </div>
+    <div class="panel-body p-0">
+      <div class="table-responsive">
+        <table id="resultsTable" class="table table-hover mb-0 w-100">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Company</th>
+              <th>Mkt Cap</th>
+              <th>Price</th>
+              <th>Analyst Target</th>
+              <th>Upside %</th>
+              <th>Strike</th>
+              <th>Moneyness</th>
+              <th>Expiry</th>
+              <th>DTE</th>
+              <th>IV %</th>
+              <th>HV %</th>
+              <th>IV / HV</th>
+              <th>Bid</th>
+              <th>Ask</th>
+              <th>Mid</th>
+              <th>Premium %</th>
+              <th>Ann. Premium %</th>
+              <th>Volume</th>
+              <th>Open Interest</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Empty state ────────────────────────────────────────────────────────── -->
+  <div id="emptyState">
+    <div class="bi-icon"><i class="fas fa-chart-bar"></i></div>
+    <h5 class="text-secondary">Configure parameters and click <strong>Scan</strong></h5>
+    <p class="small text-secondary" style="max-width:520px;margin:8px auto 0">
+      The scanner checks US stocks with market cap above your threshold,
+      identifies put options expiring within your chosen window,
+      and surfaces contracts where <strong>Implied Volatility is anomalously high</strong>
+      versus recent realized price movement — signaling potentially expensive premiums for sellers.
+    </p>
+  </div>
+
+</div><!-- container -->
+
+<!-- ── Scripts ───────────────────────────────────────────────────────────────── -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+<script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+
+<script>
+  // ── Init Bootstrap tooltips ──────────────────────────────────────────────────
+  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(el =>
+    new bootstrap.Tooltip(el, { trigger: 'hover' })
+  );
+
+  let dataTable   = null;
+  let allResults  = [];
+  let evtSrc      = null;
+
+  // ── Toggle "How it works" ────────────────────────────────────────────────────
+  function toggleHow() {
+    const body    = document.getElementById('howBody');
+    const chevron = document.getElementById('howChevron');
+    const hidden  = body.classList.toggle('d-none');
+    chevron.className = hidden
+      ? 'fas fa-chevron-up ms-auto'
+      : 'fas fa-chevron-down ms-auto';
+  }
+
+  // ── Start scan ───────────────────────────────────────────────────────────────
+  function startScan() {
+    if (evtSrc) { evtSrc.close(); evtSrc = null; }
+
+    const params = new URLSearchParams({
+      min_market_cap:   document.getElementById('minMarketCap').value,
+      min_days_to_exp:  document.getElementById('minDaysToExp').value,
+      days_to_exp:      document.getElementById('daysToExp').value,
+      iv_min:           document.getElementById('ivMin').value,
+      iv_hv_threshold:  document.getElementById('ivHvThreshold').value,
+      custom_tickers:   document.getElementById('customTickers').value,
+      only_undervalued: document.getElementById('onlyUndervalued').checked,
+    });
+
+    // Reset UI
+    setBtnScanning(true);
+    show('progressPanel'); hide('statsRow'); hide('resultsPanel'); hide('emptyState');
+    document.getElementById('scanLog').innerHTML   = '';
+    document.getElementById('progressBar').style.width = '0%';
+    document.getElementById('liveDot').classList.remove('d-none');
+
+    if (dataTable) { dataTable.destroy(); dataTable = null; }
+    document.getElementById('resultsBody').innerHTML = '';
+    allResults = [];
+
+    evtSrc = new EventSource('/api/scan?' + params.toString());
+
+    evtSrc.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if      (d.type === 'progress') onProgress(d);
+      else if (d.type === 'complete') onComplete(d);
+      else if (d.type === 'error')    onError(d.message);
+    };
+
+    evtSrc.onerror = () => {
+      if (evtSrc.readyState !== EventSource.CLOSED) onError('Connection lost. Please try again.');
+    };
+  }
+
+  // ── Progress event ───────────────────────────────────────────────────────────
+  function onProgress(d) {
+    document.getElementById('progressBar').style.width = d.pct + '%';
+    document.getElementById('progText').textContent    = 'Scanning ' + d.ticker + '…';
+    document.getElementById('progStats').textContent   = `${d.processed} / ${d.total}  ·  Found: ${d.total_found}`;
+
+    const log   = document.getElementById('scanLog');
+    const entry = document.createElement('div');
+    entry.className = d.found > 0 ? 'log-ok' : 'log-nil';
+    entry.textContent = (d.found > 0 ? '✔ ' : '· ') +
+      d.ticker.padEnd(6, ' ') + '  ' +
+      (d.found > 0 ? d.found + ' anomaly/ies found' : 'none / filtered');
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // ── Scan complete ────────────────────────────────────────────────────────────
+  function onComplete(d) {
+    evtSrc.close();
+    allResults = d.results;
+
+    setBtnScanning(false);
+    hide('progressPanel');
+    document.getElementById('liveDot').classList.add('d-none');
+
+    // Stats
+    show('statsRow');
+    document.getElementById('statScanned').textContent = d.scanned;
+    document.getElementById('statFound').textContent   = d.count;
+
+    if (d.results.length) {
+      const topIV    = Math.max(...d.results.map(r => r.iv));
+      const topRatio = Math.max(...d.results.map(r => r.iv_hv_ratio || 0));
+      document.getElementById('statTopIV').textContent    = topIV + '%';
+      document.getElementById('statTopRatio').textContent = topRatio > 0 ? topRatio.toFixed(2) + '×' : '—';
+      renderTable(d.results);
+    } else {
+      show('emptyState');
+      document.getElementById('emptyState').querySelector('h5').textContent =
+        'No anomalous put options found with current filters.';
+    }
+  }
+
+  // ── Error ────────────────────────────────────────────────────────────────────
+  function onError(msg) {
+    evtSrc && evtSrc.close();
+    setBtnScanning(false);
+    hide('progressPanel');
+    document.getElementById('liveDot').classList.add('d-none');
+    alert('Scan error: ' + msg);
+  }
+
+  // ── Render DataTable ─────────────────────────────────────────────────────────
+  function renderTable(results) {
+    show('resultsPanel');
+    document.getElementById('resultBadge').textContent = results.length;
+
+    const tbody = document.getElementById('resultsBody');
+    tbody.innerHTML = '';
+
+    results.forEach(r => {
+      const tr = document.createElement('tr');
+
+      // IV badge class
+      const ivClass  = r.iv >= 70 ? 'iv-extreme' : r.iv >= 50 ? 'iv-high' : 'iv-medium';
+
+      // IV/HV badge
+      const ratio    = r.iv_hv_ratio;
+      const ratioClass = ratio
+        ? (ratio >= 2.0 ? 'ratio-extreme' : ratio >= 1.5 ? 'ratio-high' : 'ratio-med')
+        : '';
+      const ratioHtml = ratio
+        ? `<span class="ratio-badge ${ratioClass}" data-order="${ratio}">${ratio}×</span>`
+        : `<span data-order="0" class="muted">—</span>`;
+
+      // Moneyness
+      const mSign  = r.moneyness_pct >= 0 ? '+' : '';
+      const mClass = r.moneyness_pct > 0 ? 'neg' : r.moneyness_pct < -5 ? 'muted' : '';
+      const mText  = `${mSign}${r.moneyness_pct.toFixed(1)}%`;
+
+      tr.innerHTML = `
+        <td>
+          <a class="ticker-lnk"
+             href="https://finance.yahoo.com/quote/${r.ticker}/options"
+             target="_blank" rel="noopener noreferrer">
+            ${r.ticker}
+          </a>
+        </td>
+        <td class="text-truncate" style="max-width:130px" title="${r.company}">${r.company}</td>
+        <td data-order="${r.market_cap_b}">$${r.market_cap_b}B</td>
+        <td data-order="${r.current_price}">$${r.current_price}</td>
+        <td data-order="${r.analyst_target ?? -1}" class="muted">${r.analyst_target != null ? '$' + r.analyst_target : '—'}</td>
+        <td data-order="${r.upside_pct ?? -999}" class="${r.upside_pct > 0 ? 'pos' : r.upside_pct < 0 ? 'neg' : 'muted'}">${r.upside_pct != null ? (r.upside_pct > 0 ? '+' : '') + r.upside_pct + '%' : '—'}</td>
+        <td data-order="${r.strike}">$${r.strike}</td>
+        <td class="${mClass}" data-order="${r.moneyness_pct}">${mText}</td>
+        <td>${r.exp_date}</td>
+        <td data-order="${r.dte}">${r.dte}d</td>
+        <td data-order="${r.iv}"><span class="iv-badge ${ivClass}">${r.iv}%</span></td>
+        <td data-order="${r.hv ?? -1}" class="muted">${r.hv !== null ? r.hv + '%' : '—'}</td>
+        <td data-order="${ratio ?? 0}">${ratioHtml}</td>
+        <td data-order="${r.bid}">$${r.bid}</td>
+        <td data-order="${r.ask}">$${r.ask}</td>
+        <td data-order="${r.mid}" class="fw-bold">$${r.mid}</td>
+        <td data-order="${r.premium_pct}" class="pos">${r.premium_pct}%</td>
+        <td data-order="${r.ann_premium_pct}" class="pos fw-bold">${r.ann_premium_pct}%</td>
+        <td data-order="${r.volume}">${r.volume.toLocaleString()}</td>
+        <td data-order="${r.open_interest}">${r.open_interest.toLocaleString()}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    dataTable = new DataTable('#resultsTable', {
+      pageLength: 25,
+      order:      [[10, 'desc']],    // default: sort by IV/HV ratio desc
+      responsive: false,
+      dom: '<"row mb-2 px-3"<"col-sm-6"l><"col-sm-6"f>>tip',
+      columnDefs: [
+        { targets: '_all', orderDataType: 'dom-data-order' },
+      ],
+      language: { search: '<i class="fas fa-search me-1 text-secondary"></i>' },
+    });
+  }
+
+  // ── Export CSV ───────────────────────────────────────────────────────────────
+  function exportCSV() {
+    if (!allResults.length) return;
+
+    const headers = [
+      'Ticker','Company','Market Cap (B$)','Current Price','Strike',
+      'Moneyness %','Expiry','DTE','IV %','HV %','IV/HV Ratio',
+      'Bid','Ask','Mid','Premium %','Ann Premium %','Volume','Open Interest',
+    ];
+
+    const rows = allResults.map(r => [
+      r.ticker, `"${r.company}"`, r.market_cap_b, r.current_price, r.strike,
+      r.moneyness_pct, r.exp_date, r.dte, r.iv, r.hv ?? '', r.iv_hv_ratio ?? '',
+      r.bid, r.ask, r.mid, r.premium_pct, r.ann_premium_pct, r.volume, r.open_interest,
+    ]);
+
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `put_anomalies_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+  function show(id) { document.getElementById(id).classList.remove('d-none'); }
+  function hide(id) { document.getElementById(id).classList.add('d-none'); }
+
+  function setBtnScanning(on) {
+    const btn = document.getElementById('scanBtn');
+    btn.disabled = on;
+    btn.innerHTML = on
+      ? '<i class="fas fa-spinner fa-spin me-1"></i> Scanning…'
+      : '<i class="fas fa-search me-1"></i> Scan';
+  }
+</script>
+</body>
+</html>
