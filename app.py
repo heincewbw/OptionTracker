@@ -294,10 +294,15 @@ def scan():
 
         while True:
             try:
-                item = q.get(timeout=120)
+                item = q.get(timeout=10)  # 10s timeout → send heartbeat
             except queue.Empty:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Scan timed out'})}\n\n"
-                return
+                if threading.active_count() > 1:
+                    # Worker still running — send SSE comment as keepalive
+                    yield ": ping\n\n"
+                    continue
+                else:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Scan timed out'})}\n\n"
+                    return
 
             if item is None:
                 # All done — sort by IV/HV ratio descending
