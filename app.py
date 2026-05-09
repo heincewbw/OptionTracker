@@ -307,8 +307,8 @@ def scan_start():
         import time, queue as q_mod
         job          = JOBS[job_id]
         rq           = q_mod.Queue()
-        TOTAL_TIMEOUT = 90   # absolute hard cap
-        STALL_TIMEOUT = 15   # bail if no ticker arrives for this many seconds
+        TOTAL_TIMEOUT = 45   # absolute hard cap — scan WILL finish within 45s
+        STALL_TIMEOUT = 5    # bail if no ticker arrives for 5s
 
         for sym in tickers:
             def _run(s=sym):
@@ -332,7 +332,7 @@ def scan_start():
             if now - last_received >= STALL_TIMEOUT:
                 break   # no ticker arrived for 15s → release now
             try:
-                sym, res = rq.get(timeout=1.0)   # short poll so stall check stays responsive
+                sym, res = rq.get(timeout=0.5)   # poll every 0.5s for responsive stall check
             except q_mod.Empty:
                 continue
 
@@ -365,7 +365,7 @@ def scan_start():
 
     def _watchdog():
         import time
-        time.sleep(120)
+        time.sleep(60)
         j = JOBS.get(job_id, {})
         if j.get("status") != "done":
             j.get("results", []).sort(
