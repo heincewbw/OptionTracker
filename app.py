@@ -307,12 +307,14 @@ def scan_start():
     def worker():
         job = JOBS[job_id]
         BATCH_SIZE = 6
-        BATCH_TIMEOUT = 15  # seconds to wait for a batch of 6 tickers
+        BATCH_TIMEOUT = 15  # seconds per batch
 
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_SIZE)
         try:
             for i in range(0, len(tickers), BATCH_SIZE):
                 batch = tickers[i:i + BATCH_SIZE]
+
+                # New pool per batch — hung threads from previous batch can't block this one
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_SIZE)
                 future_map = {
                     pool.submit(
                         process_ticker, sym, min_mktcap, min_dte, max_dte,
@@ -320,11 +322,11 @@ def scan_start():
                     ): sym
                     for sym in batch
                 }
-                # Wait at most BATCH_TIMEOUT seconds for this batch
                 done, not_done = concurrent.futures.wait(
                     future_map, timeout=BATCH_TIMEOUT
                 )
-                # Process completed futures
+                pool.shutdown(wait=False)  # release hung threads, don't block
+
                 for fut in done:
                     sym = future_map[fut]
                     try:
@@ -338,7 +340,6 @@ def scan_start():
                         "found": len(res),
                         "pct":   round(job["processed"] / job["total"] * 100),
                     })
-                # Skip hung futures
                 for fut in not_done:
                     sym = future_map[fut]
                     fut.cancel()
@@ -359,7 +360,6 @@ def scan_start():
         except Exception as e:
             logger.warning("worker error: %s", e)
         finally:
-            pool.shutdown(wait=False)
             job["status"] = "done"
 
     threading.Thread(target=worker, daemon=True).start()
