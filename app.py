@@ -256,7 +256,7 @@ def index():
 def scan_start():
     data = request.get_json(force=True, silent=True) or {}
 
-    min_mktcap       = float(data.get("min_market_cap",    20))  * 1e9
+    min_mktcap       = float(data.get("min_market_cap",   100))  * 1e9
     min_dte          = int(  data.get("min_days_to_exp",   30))
     max_dte          = int(  data.get("days_to_exp",       60))
     iv_hv_thr        = float(data.get("iv_hv_threshold",  1.3))
