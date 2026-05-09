@@ -318,7 +318,7 @@ def scan_start():
             }
             done_set: set = set()
             last_progress = time.monotonic()
-            STALL_LIMIT = 20  # bail if no ticker completes for 20s in a row
+            STALL_LIMIT = 15  # bail if no ticker completes for 15s
 
             while len(done_set) < len(future_map):
                 pending = [f for f in future_map if f not in done_set]
@@ -344,9 +344,8 @@ def scan_start():
                             "pct":   round(job["processed"] / job["total"] * 100),
                         })
                 else:
-                    # No ticker finished in 5s — check stall timer
                     if time.monotonic() - last_progress > STALL_LIMIT:
-                        break  # hung thread detected, give up waiting
+                        break  # hung thread, give up
 
             # Mark any remaining hung futures as skipped
             for f, sym in future_map.items():
@@ -357,16 +356,20 @@ def scan_start():
                         "found": 0,
                         "pct":   round(job["processed"] / job["total"] * 100),
                     })
-        finally:
-            pool.shutdown(wait=False)
 
-        # Sort by IV/HV ratio (best anomalies first), keep top 15
-        job["results"].sort(
-            key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-            reverse=True,
-        )
-        job["results"] = job["results"][:15]
-        job["status"] = "done"
+            # Sort and keep top 15
+            job["results"].sort(
+                key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+                reverse=True,
+            )
+            job["results"] = job["results"][:15]
+
+        except Exception as e:
+            logger.warning("worker error: %s", e)
+        finally:
+            # Always mark done — this runs even if an exception occurs
+            pool.shutdown(wait=False)
+            job["status"] = "done"
 
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(tickers)})
