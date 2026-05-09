@@ -305,13 +305,11 @@ def scan_start():
 
     def worker():
         import time, queue as q_mod
-        job = JOBS[job_id]
-        rq  = q_mod.Queue()
-        TOTAL_TIMEOUT = 90  # hard cap: scan always finishes within 90s
+        job          = JOBS[job_id]
+        rq           = q_mod.Queue()
+        TOTAL_TIMEOUT = 90   # absolute hard cap
+        STALL_TIMEOUT = 15   # bail if no ticker arrives for this many seconds
 
-        # Launch ALL ticker threads at once.
-        # They are I/O-bound so GIL is released during network waits.
-        # Daemon=True ensures they die with the process.
         for sym in tickers:
             def _run(s=sym):
                 try:
@@ -320,26 +318,28 @@ def scan_start():
                         iv_hv_thr, iv_min, only_undervalued)
                 except Exception:
                     res = []
-                rq.put((s, res))   # always put, even on error
+                rq.put((s, res))
             threading.Thread(target=_run, daemon=True).start()
 
-        # Collect results via queue.get(timeout) — Python primitive,
-        # guaranteed to unblock after timeout regardless of thread state.
         collected: set = set()
-        deadline = time.monotonic() + TOTAL_TIMEOUT
+        deadline      = time.monotonic() + TOTAL_TIMEOUT
+        last_received = time.monotonic()
 
         while len(collected) < len(tickers):
-            rem = deadline - time.monotonic()
-            if rem <= 0:
+            now = time.monotonic()
+            if now >= deadline:
                 break
+            if now - last_received >= STALL_TIMEOUT:
+                break   # no ticker arrived for 15s → release now
             try:
-                sym, res = rq.get(timeout=min(5.0, rem))
+                sym, res = rq.get(timeout=1.0)   # short poll so stall check stays responsive
             except q_mod.Empty:
-                continue  # deadline re-checked at top of loop
+                continue
 
             if sym in collected:
-                continue   # duplicate (shouldn't happen, but guard anyway)
+                continue
             collected.add(sym)
+            last_received = time.monotonic()   # reset stall timer
             job["processed"] += 1
             job["results"].extend(res)
             job["log"].append({
@@ -348,7 +348,7 @@ def scan_start():
                 "pct":   round(job["processed"] / job["total"] * 100),
             })
 
-        # Any ticker that didn't finish in time → mark as skipped
+        # Anything not yet collected → mark skipped immediately
         for sym in tickers:
             if sym not in collected:
                 job["processed"] += 1
