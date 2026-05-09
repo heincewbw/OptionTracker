@@ -305,6 +305,7 @@ def scan_start():
     }
 
     def worker():
+        import time
         job = JOBS[job_id]
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         try:
@@ -315,33 +316,48 @@ def scan_start():
                 ): sym
                 for sym in tickers
             }
-            try:
-                for fut in concurrent.futures.as_completed(future_map, timeout=180):
-                    sym = future_map[fut]
-                    try:
-                        res = fut.result()
-                    except Exception:
-                        res = []
-                    job["processed"] += 1
-                    job["results"].extend(res)
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": len(res),
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
-            except concurrent.futures.TimeoutError:
-                # Some threads are still blocking — mark remaining as skipped
-                for f, sym in future_map.items():
-                    if not f.done():
-                        f.cancel()
+            done_set: set = set()
+            last_progress = time.monotonic()
+            STALL_LIMIT = 20  # bail if no ticker completes for 20s in a row
+
+            while len(done_set) < len(future_map):
+                pending = [f for f in future_map if f not in done_set]
+                newly_done, _ = concurrent.futures.wait(
+                    pending, timeout=5,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+
+                if newly_done:
+                    last_progress = time.monotonic()
+                    for fut in newly_done:
+                        done_set.add(fut)
+                        sym = future_map[fut]
+                        try:
+                            res = fut.result()
+                        except Exception:
+                            res = []
                         job["processed"] += 1
+                        job["results"].extend(res)
                         job["log"].append({
                             "sym":   sym,
-                            "found": 0,
+                            "found": len(res),
                             "pct":   round(job["processed"] / job["total"] * 100),
                         })
+                else:
+                    # No ticker finished in 5s — check stall timer
+                    if time.monotonic() - last_progress > STALL_LIMIT:
+                        break  # hung thread detected, give up waiting
+
+            # Mark any remaining hung futures as skipped
+            for f, sym in future_map.items():
+                if f not in done_set:
+                    job["processed"] += 1
+                    job["log"].append({
+                        "sym":   sym,
+                        "found": 0,
+                        "pct":   round(job["processed"] / job["total"] * 100),
+                    })
         finally:
-            # wait=False: don't block on hanging threads — let them die on their own
             pool.shutdown(wait=False)
 
         # Sort by IV/HV ratio (best anomalies first), keep top 15
