@@ -349,12 +349,12 @@ def scan_start():
                         "pct":   round(job["processed"] / job["total"] * 100),
                     })
 
-            # Sort and keep top 15
+            # Sort and keep top 50
             job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True,
             )
-            job["results"] = job["results"][:15]
+            job["results"] = job["results"][:50]
 
         except Exception as e:
             logger.warning("worker error: %s", e)
