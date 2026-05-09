@@ -305,64 +305,79 @@ def scan_start():
     }
 
     def worker():
-        job = JOBS[job_id]
-        BATCH_SIZE = 6
-        BATCH_TIMEOUT = 15  # seconds per batch
+        import time
+        job      = JOBS[job_id]
+        BATCH    = 6
+        TIMEOUT  = 10   # seconds per batch
+        DEADLINE = time.monotonic() + 100  # hard total cap
 
         try:
-            for i in range(0, len(tickers), BATCH_SIZE):
-                batch = tickers[i:i + BATCH_SIZE]
+            for i in range(0, len(tickers), BATCH):
+                # ── Hard total deadline ────────────────────────────────────────
+                remaining = DEADLINE - time.monotonic()
+                if remaining <= 0:
+                    for sym in tickers[i:]:
+                        job["processed"] += 1
+                        job["log"].append({"sym": sym, "found": 0,
+                            "pct": round(job["processed"] / job["total"] * 100)})
+                    break
 
-                # New pool per batch — hung threads from previous batch can't block this one
-                pool = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH_SIZE)
-                future_map = {
+                batch   = tickers[i:i + BATCH]
+                wait_t  = min(TIMEOUT, remaining)
+
+                # Fresh pool per batch so hung threads from prior batch
+                # cannot occupy worker slots for this batch.
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH)
+                fmap = {
                     pool.submit(
                         process_ticker, sym, min_mktcap, min_dte, max_dte,
                         iv_hv_thr, iv_min, only_undervalued
                     ): sym
                     for sym in batch
                 }
-                done, not_done = concurrent.futures.wait(
-                    future_map, timeout=BATCH_TIMEOUT
-                )
-                pool.shutdown(wait=False)  # release hung threads, don't block
+                done, not_done = concurrent.futures.wait(fmap, timeout=wait_t)
+                pool.shutdown(wait=False)   # never block waiting for hung threads
 
                 for fut in done:
-                    sym = future_map[fut]
-                    try:
-                        res = fut.result()
-                    except Exception:
-                        res = []
+                    sym = fmap[fut]
+                    try:   res = fut.result()
+                    except Exception: res = []
                     job["processed"] += 1
                     job["results"].extend(res)
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": len(res),
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
+                    job["log"].append({"sym": sym, "found": len(res),
+                        "pct": round(job["processed"] / job["total"] * 100)})
+
                 for fut in not_done:
-                    sym = future_map[fut]
+                    sym = fmap[fut]
                     fut.cancel()
                     job["processed"] += 1
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": 0,
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
+                    job["log"].append({"sym": sym, "found": 0,
+                        "pct": round(job["processed"] / job["total"] * 100)})
 
-            # Sort and keep top 50
             job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-                reverse=True,
-            )
+                reverse=True)
             job["results"] = job["results"][:50]
 
         except Exception as e:
             logger.warning("worker error: %s", e)
         finally:
-            job["status"] = "done"
+            job["status"] = "done"   # ALWAYS reached
 
-    threading.Thread(target=worker, daemon=True).start()
+    # ── Watchdog: absolute safety-net — marks done after 110s no matter what ──
+    def watchdog():
+        import time
+        time.sleep(110)
+        if JOBS.get(job_id, {}).get("status") != "done":
+            j = JOBS[job_id]
+            j["results"].sort(
+                key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+                reverse=True)
+            j["results"] = j["results"][:50]
+            j["status"]  = "done"
+
+    threading.Thread(target=worker,   daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(tickers)})
 
 
