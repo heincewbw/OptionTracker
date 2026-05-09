@@ -306,7 +306,8 @@ def scan_start():
 
     def worker():
         job = JOBS[job_id]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+        try:
             future_map = {
                 pool.submit(
                     process_ticker, sym, min_mktcap, min_dte, max_dte,
@@ -314,7 +315,6 @@ def scan_start():
                 ): sym
                 for sym in tickers
             }
-            # as_completed with overall 180s cap; socket timeout handles per-call hangs
             try:
                 for fut in concurrent.futures.as_completed(future_map, timeout=180):
                     sym = future_map[fut]
@@ -330,7 +330,7 @@ def scan_start():
                         "pct":   round(job["processed"] / job["total"] * 100),
                     })
             except concurrent.futures.TimeoutError:
-                # Force-complete any remaining tickers that never finished
+                # Some threads are still blocking — mark remaining as skipped
                 for f, sym in future_map.items():
                     if not f.done():
                         f.cancel()
@@ -340,6 +340,9 @@ def scan_start():
                             "found": 0,
                             "pct":   round(job["processed"] / job["total"] * 100),
                         })
+        finally:
+            # wait=False: don't block on hanging threads — let them die on their own
+            pool.shutdown(wait=False)
 
         # Sort by IV/HV ratio (best anomalies first), keep top 15
         job["results"].sort(
