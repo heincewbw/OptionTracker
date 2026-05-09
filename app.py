@@ -25,7 +25,7 @@ HTTP_TIMEOUT = 8
 
 _orig_requests_request = requests.Session.request
 def _requests_request_with_timeout(self, method, url, **kwargs):
-    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    kwargs["timeout"] = HTTP_TIMEOUT  # force override, yfinance passes timeout=30 explicitly
     return _orig_requests_request(self, method, url, **kwargs)
 requests.Session.request = _requests_request_with_timeout
 
@@ -33,7 +33,7 @@ try:
     from curl_cffi import requests as curl_requests
     _orig_curl_request = curl_requests.Session.request
     def _curl_request_with_timeout(self, method, url, **kwargs):
-        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        kwargs["timeout"] = HTTP_TIMEOUT  # force override, yfinance passes timeout=30 explicitly
         return _orig_curl_request(self, method, url, **kwargs)
     curl_requests.Session.request = _curl_request_with_timeout
 except ImportError:
