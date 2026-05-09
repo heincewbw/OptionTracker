@@ -296,11 +296,12 @@ def scan_start():
 
     job_id = str(uuid.uuid4())
     JOBS[job_id] = {
-        "status":    "running",
-        "processed": 0,
-        "total":     len(tickers),
-        "log":       [],
-        "results":   [],
+        "status":     "running",
+        "processed":  0,
+        "total":      len(tickers),
+        "log":        [],
+        "results":    [],
+        "started_at": __import__("time").monotonic(),
     }
 
     def worker():
@@ -389,15 +390,28 @@ def scan_start():
 
 @app.route("/api/scan/status/<job_id>")
 def scan_status(job_id):
+    import time
     job = JOBS.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
+
+    # Force-complete if job has been running more than 60s — catches any
+    # scenario where the background worker or watchdog failed to set "done".
+    if job["status"] == "running":
+        elapsed = time.monotonic() - job.get("started_at", time.monotonic())
+        if elapsed > 60:
+            job["results"].sort(
+                key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+                reverse=True)
+            job["results"] = job["results"][:50]
+            job["status"] = "done"
+
     return jsonify({
         "status":    job["status"],
         "processed": job["processed"],
         "total":     job["total"],
         "pct":       round(job["processed"] / job["total"] * 100) if job["total"] else 0,
-        "log":       job["log"][-30:],   # last 30 log entries
+        "log":       job["log"][-30:],
         "count":     len(job["results"]),
         "results":   job["results"] if job["status"] == "done" else [],
     })
