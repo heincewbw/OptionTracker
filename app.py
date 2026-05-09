@@ -24,7 +24,7 @@ import yfinance as yf
 _orig_session_request = requests.Session.request
 
 def _session_request_with_timeout(self, method, url, **kwargs):
-    kwargs.setdefault("timeout", 15)
+    kwargs.setdefault("timeout", 8)
     return _orig_session_request(self, method, url, **kwargs)
 
 requests.Session.request = _session_request_with_timeout
