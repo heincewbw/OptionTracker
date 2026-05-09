@@ -306,32 +306,49 @@ def scan_start():
 
     def worker():
         import time
+        PER_TICKER_TIMEOUT = 12  # seconds per ticker before we skip it
+
         job = JOBS[job_id]
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=6)
         try:
-            future_map = {
-                pool.submit(
+            # Track each future with its submission time
+            future_info: dict = {}
+            for sym in tickers:
+                fut = pool.submit(
                     process_ticker, sym, min_mktcap, min_dte, max_dte,
                     iv_hv_thr, iv_min, only_undervalued
-                ): sym
-                for sym in tickers
-            }
-            done_set: set = set()
-            last_progress = time.monotonic()
-            STALL_LIMIT = 15  # bail if no ticker completes for 15s
+                )
+                future_info[fut] = (sym, time.monotonic())
 
-            while len(done_set) < len(future_map):
-                pending = [f for f in future_map if f not in done_set]
+            done_set: set = set()
+
+            while len(done_set) < len(future_info):
+                now = time.monotonic()
+
+                # Force-expire any ticker that has been running too long
+                for fut, (sym, start) in future_info.items():
+                    if fut not in done_set and (now - start) > PER_TICKER_TIMEOUT:
+                        done_set.add(fut)
+                        job["processed"] += 1
+                        job["log"].append({
+                            "sym":   sym,
+                            "found": 0,
+                            "pct":   round(job["processed"] / job["total"] * 100),
+                        })
+
+                pending = [f for f in future_info if f not in done_set]
+                if not pending:
+                    break
+
+                # Wait up to 1s for any future to complete
                 newly_done, _ = concurrent.futures.wait(
-                    pending, timeout=5,
+                    pending, timeout=1,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
-
-                if newly_done:
-                    last_progress = time.monotonic()
-                    for fut in newly_done:
+                for fut in newly_done:
+                    if fut not in done_set:
                         done_set.add(fut)
-                        sym = future_map[fut]
+                        sym, _ = future_info[fut]
                         try:
                             res = fut.result()
                         except Exception:
@@ -343,19 +360,6 @@ def scan_start():
                             "found": len(res),
                             "pct":   round(job["processed"] / job["total"] * 100),
                         })
-                else:
-                    if time.monotonic() - last_progress > STALL_LIMIT:
-                        break  # hung thread, give up
-
-            # Mark any remaining hung futures as skipped
-            for f, sym in future_map.items():
-                if f not in done_set:
-                    job["processed"] += 1
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": 0,
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
 
             # Sort and keep top 15
             job["results"].sort(
@@ -367,7 +371,6 @@ def scan_start():
         except Exception as e:
             logger.warning("worker error: %s", e)
         finally:
-            # Always mark done — this runs even if an exception occurs
             pool.shutdown(wait=False)
             job["status"] = "done"
 
