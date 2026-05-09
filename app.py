@@ -306,11 +306,12 @@ def scan_start():
                     "pct":   round(job["processed"] / job["total"] * 100),
                 })
 
-        # Sort and mark done
+        # Sort by IV/HV ratio (best anomalies first), keep top 15
         job["results"].sort(
             key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
             reverse=True,
         )
+        job["results"] = job["results"][:15]
         job["status"] = "done"
 
     threading.Thread(target=worker, daemon=True).start()
