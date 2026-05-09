@@ -479,11 +479,12 @@
     new bootstrap.Tooltip(el, { trigger: 'hover' })
   );
 
-  let dataTable   = null;
-  let allResults  = [];
-  let pollTimer   = null;
-  let currentJob  = null;
-  let seenLogs    = 0;
+  let dataTable          = null;
+  let allResults         = [];
+  let pollTimer          = null;
+  let currentJob         = null;
+  let seenLogs           = 0;
+  let jobNotFoundRetries = 0;
 
   // ── Toggle "How it works" ────────────────────────────────────────────────────
   function toggleHow() {
@@ -528,8 +529,9 @@
     })
     .then(r => r.json())
     .then(data => {
-      currentJob = data.job_id;
-      pollTimer  = setInterval(pollStatus, 2000);
+      currentJob         = data.job_id;
+      jobNotFoundRetries = 0;
+      pollTimer          = setInterval(pollStatus, 2000);
     })
     .catch(() => onError('Failed to start scan. Please try again.'));
   }
@@ -540,7 +542,16 @@
     fetch('/api/scan/status/' + currentJob)
       .then(r => r.json())
       .then(d => {
-        if (d.error) { onError(d.error); return; }
+        if (d.error) {
+          // Railway may route polls to a different instance temporarily — retry up to 5x
+          if (d.error === 'Job not found' && jobNotFoundRetries < 5) {
+            jobNotFoundRetries++;
+            return;
+          }
+          onError(d.error);
+          return;
+        }
+        jobNotFoundRetries = 0;
 
         // Update progress bar
         document.getElementById('progressBar').style.width = d.pct + '%';
