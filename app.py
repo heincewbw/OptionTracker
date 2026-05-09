@@ -304,63 +304,68 @@ def scan_start():
     }
 
     def worker():
-        import time
-        job        = JOBS[job_id]
-        GROUP      = 6     # tickers per group
-        GRP_LIMIT  = 12    # seconds for the whole group
+        import time, queue as q_mod
+        job = JOBS[job_id]
+        rq  = q_mod.Queue()
+        TOTAL_TIMEOUT = 90  # hard cap: scan always finishes within 90s
 
-        try:
-            for i in range(0, len(tickers), GROUP):
-                group      = tickers[i:i + GROUP]
-                res_map    = {sym: [] for sym in group}
-                events     = {sym: threading.Event() for sym in group}
+        # Launch ALL ticker threads at once.
+        # They are I/O-bound so GIL is released during network waits.
+        # Daemon=True ensures they die with the process.
+        for sym in tickers:
+            def _run(s=sym):
+                try:
+                    res = process_ticker(
+                        s, min_mktcap, min_dte, max_dte,
+                        iv_hv_thr, iv_min, only_undervalued)
+                except Exception:
+                    res = []
+                rq.put((s, res))   # always put, even on error
+            threading.Thread(target=_run, daemon=True).start()
 
-                # Start one daemon thread per ticker — no pool, no accumulation
-                for sym in group:
-                    def _run(s=sym):
-                        try:
-                            res_map[s] = process_ticker(
-                                s, min_mktcap, min_dte, max_dte,
-                                iv_hv_thr, iv_min, only_undervalued)
-                        except Exception:
-                            res_map[s] = []
-                        events[s].set()
-                    threading.Thread(target=_run, daemon=True).start()
+        # Collect results via queue.get(timeout) — Python primitive,
+        # guaranteed to unblock after timeout regardless of thread state.
+        collected: set = set()
+        deadline = time.monotonic() + TOTAL_TIMEOUT
 
-                # Wait for each event with a SHARED group deadline.
-                # threading.Event.wait(timeout) is a Python primitive —
-                # it ALWAYS returns after `timeout` seconds, no matter
-                # what the underlying thread is doing.
-                deadline = time.monotonic() + GRP_LIMIT
-                for sym in group:
-                    rem = deadline - time.monotonic()
-                    events[sym].wait(timeout=max(0.0, rem))
+        while len(collected) < len(tickers):
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            try:
+                sym, res = rq.get(timeout=min(5.0, rem))
+            except q_mod.Empty:
+                continue  # deadline re-checked at top of loop
 
-                # Collect whatever finished (or empty list if it timed out)
-                for sym in group:
-                    res = res_map[sym]
-                    job["processed"] += 1
-                    job["results"].extend(res)
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": len(res),
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
+            if sym in collected:
+                continue   # duplicate (shouldn't happen, but guard anyway)
+            collected.add(sym)
+            job["processed"] += 1
+            job["results"].extend(res)
+            job["log"].append({
+                "sym":   sym,
+                "found": len(res),
+                "pct":   round(job["processed"] / job["total"] * 100),
+            })
 
-            job["results"].sort(
-                key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-                reverse=True)
-            job["results"] = job["results"][:50]
+        # Any ticker that didn't finish in time → mark as skipped
+        for sym in tickers:
+            if sym not in collected:
+                job["processed"] += 1
+                job["log"].append({
+                    "sym":   sym,
+                    "found": 0,
+                    "pct":   round(job["processed"] / job["total"] * 100),
+                })
 
-        except Exception as e:
-            logger.warning("worker error: %s", e)
-        finally:
-            job["status"] = "done"   # runs no matter what
+        job["results"].sort(
+            key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+            reverse=True)
+        job["results"] = job["results"][:50]
 
-    # Safety-net watchdog — fires after 180s regardless of worker state
     def _watchdog():
         import time
-        time.sleep(180)
+        time.sleep(120)
         j = JOBS.get(job_id, {})
         if j.get("status") != "done":
             j.get("results", []).sort(
@@ -369,8 +374,16 @@ def scan_start():
             j["results"] = j.get("results", [])[:50]
             j["status"]  = "done"
 
-    threading.Thread(target=worker,   daemon=True).start()
-    threading.Thread(target=_watchdog, daemon=True).start()
+    def _run_worker():
+        try:
+            worker()
+        except Exception as e:
+            logger.warning("worker crashed: %s", e)
+        finally:
+            JOBS[job_id]["status"] = "done"
+
+    threading.Thread(target=_run_worker, daemon=True).start()
+    threading.Thread(target=_watchdog,   daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(tickers)})
 
 
