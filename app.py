@@ -9,7 +9,6 @@ import logging
 import json
 import uuid
 import threading
-import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -306,53 +305,47 @@ def scan_start():
 
     def worker():
         import time
-        job      = JOBS[job_id]
-        BATCH    = 6
-        TIMEOUT  = 10   # seconds per batch
-        DEADLINE = time.monotonic() + 100  # hard total cap
+        job        = JOBS[job_id]
+        GROUP      = 6     # tickers per group
+        GRP_LIMIT  = 12    # seconds for the whole group
 
         try:
-            for i in range(0, len(tickers), BATCH):
-                # ── Hard total deadline ────────────────────────────────────────
-                remaining = DEADLINE - time.monotonic()
-                if remaining <= 0:
-                    for sym in tickers[i:]:
-                        job["processed"] += 1
-                        job["log"].append({"sym": sym, "found": 0,
-                            "pct": round(job["processed"] / job["total"] * 100)})
-                    break
+            for i in range(0, len(tickers), GROUP):
+                group      = tickers[i:i + GROUP]
+                res_map    = {sym: [] for sym in group}
+                events     = {sym: threading.Event() for sym in group}
 
-                batch   = tickers[i:i + BATCH]
-                wait_t  = min(TIMEOUT, remaining)
+                # Start one daemon thread per ticker — no pool, no accumulation
+                for sym in group:
+                    def _run(s=sym):
+                        try:
+                            res_map[s] = process_ticker(
+                                s, min_mktcap, min_dte, max_dte,
+                                iv_hv_thr, iv_min, only_undervalued)
+                        except Exception:
+                            res_map[s] = []
+                        events[s].set()
+                    threading.Thread(target=_run, daemon=True).start()
 
-                # Fresh pool per batch so hung threads from prior batch
-                # cannot occupy worker slots for this batch.
-                pool = concurrent.futures.ThreadPoolExecutor(max_workers=BATCH)
-                fmap = {
-                    pool.submit(
-                        process_ticker, sym, min_mktcap, min_dte, max_dte,
-                        iv_hv_thr, iv_min, only_undervalued
-                    ): sym
-                    for sym in batch
-                }
-                done, not_done = concurrent.futures.wait(fmap, timeout=wait_t)
-                pool.shutdown(wait=False)   # never block waiting for hung threads
+                # Wait for each event with a SHARED group deadline.
+                # threading.Event.wait(timeout) is a Python primitive —
+                # it ALWAYS returns after `timeout` seconds, no matter
+                # what the underlying thread is doing.
+                deadline = time.monotonic() + GRP_LIMIT
+                for sym in group:
+                    rem = deadline - time.monotonic()
+                    events[sym].wait(timeout=max(0.0, rem))
 
-                for fut in done:
-                    sym = fmap[fut]
-                    try:   res = fut.result()
-                    except Exception: res = []
+                # Collect whatever finished (or empty list if it timed out)
+                for sym in group:
+                    res = res_map[sym]
                     job["processed"] += 1
                     job["results"].extend(res)
-                    job["log"].append({"sym": sym, "found": len(res),
-                        "pct": round(job["processed"] / job["total"] * 100)})
-
-                for fut in not_done:
-                    sym = fmap[fut]
-                    fut.cancel()
-                    job["processed"] += 1
-                    job["log"].append({"sym": sym, "found": 0,
-                        "pct": round(job["processed"] / job["total"] * 100)})
+                    job["log"].append({
+                        "sym":   sym,
+                        "found": len(res),
+                        "pct":   round(job["processed"] / job["total"] * 100),
+                    })
 
             job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
@@ -362,22 +355,22 @@ def scan_start():
         except Exception as e:
             logger.warning("worker error: %s", e)
         finally:
-            job["status"] = "done"   # ALWAYS reached
+            job["status"] = "done"   # runs no matter what
 
-    # ── Watchdog: absolute safety-net — marks done after 110s no matter what ──
-    def watchdog():
+    # Safety-net watchdog — fires after 180s regardless of worker state
+    def _watchdog():
         import time
-        time.sleep(110)
-        if JOBS.get(job_id, {}).get("status") != "done":
-            j = JOBS[job_id]
-            j["results"].sort(
+        time.sleep(180)
+        j = JOBS.get(job_id, {})
+        if j.get("status") != "done":
+            j.get("results", []).sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True)
-            j["results"] = j["results"][:50]
+            j["results"] = j.get("results", [])[:50]
             j["status"]  = "done"
 
     threading.Thread(target=worker,   daemon=True).start()
-    threading.Thread(target=watchdog, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(tickers)})
 
 
