@@ -292,19 +292,31 @@ def scan_start():
                 ): sym
                 for sym in tickers
             }
-            for fut in concurrent.futures.as_completed(future_map):
-                sym = future_map[fut]
-                try:
-                    res = fut.result(timeout=45)
-                except Exception:
-                    res = []
-                job["processed"] += 1
-                job["results"].extend(res)
-                job["log"].append({
-                    "sym":   sym,
-                    "found": len(res),
-                    "pct":   round(job["processed"] / job["total"] * 100),
-                })
+            # Overall timeout of 240 s — prevent hanging on slow/stuck tickers
+            try:
+                for fut in concurrent.futures.as_completed(future_map, timeout=240):
+                    sym = future_map[fut]
+                    try:
+                        res = fut.result(timeout=20)
+                    except Exception:
+                        res = []
+                    job["processed"] += 1
+                    job["results"].extend(res)
+                    job["log"].append({
+                        "sym":   sym,
+                        "found": len(res),
+                        "pct":   round(job["processed"] / job["total"] * 100),
+                    })
+            except concurrent.futures.TimeoutError:
+                # Force-complete any remaining tickers that never finished
+                for f, sym in future_map.items():
+                    if not f.done():
+                        job["processed"] += 1
+                        job["log"].append({
+                            "sym":   sym,
+                            "found": 0,
+                            "pct":   round(job["processed"] / job["total"] * 100),
+                        })
 
         # Sort by IV/HV ratio (best anomalies first), keep top 15
         job["results"].sort(
