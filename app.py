@@ -8,6 +8,7 @@ Requires Python 3.10+
 import logging
 import json
 import uuid
+import socket
 import threading
 import concurrent.futures
 from datetime import datetime, timedelta
@@ -16,6 +17,9 @@ from typing import Optional
 import numpy as np
 from flask import Flask, render_template, request, jsonify
 import yfinance as yf
+
+# Force all socket/HTTP calls (including yfinance) to timeout after 15 s
+socket.setdefaulttimeout(15)
 
 # ── In-memory job store ─────────────────────────────────────────────────────────
 # { job_id: { "status": "running"|"done"|"error",
@@ -292,12 +296,12 @@ def scan_start():
                 ): sym
                 for sym in tickers
             }
-            # Overall timeout of 240 s — prevent hanging on slow/stuck tickers
+            # as_completed with overall 180s cap; socket timeout handles per-call hangs
             try:
-                for fut in concurrent.futures.as_completed(future_map, timeout=240):
+                for fut in concurrent.futures.as_completed(future_map, timeout=180):
                     sym = future_map[fut]
                     try:
-                        res = fut.result(timeout=20)
+                        res = fut.result()
                     except Exception:
                         res = []
                     job["processed"] += 1
@@ -311,6 +315,7 @@ def scan_start():
                 # Force-complete any remaining tickers that never finished
                 for f, sym in future_map.items():
                     if not f.done():
+                        f.cancel()
                         job["processed"] += 1
                         job["log"].append({
                             "sym":   sym,
