@@ -8,18 +8,26 @@ Requires Python 3.10+
 import logging
 import json
 import uuid
-import socket
 import threading
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional
 
+import requests
 import numpy as np
 from flask import Flask, render_template, request, jsonify
 import yfinance as yf
 
-# Force all socket/HTTP calls (including yfinance) to timeout after 15 s
-socket.setdefaulttimeout(15)
+# ── Force requests (used by yfinance/urllib3) to always timeout ─────────────────
+# socket.setdefaulttimeout is bypassed by urllib3; monkey-patching Session.request
+# is the only reliable way to enforce a timeout on all yfinance HTTP calls.
+_orig_session_request = requests.Session.request
+
+def _session_request_with_timeout(self, method, url, **kwargs):
+    kwargs.setdefault("timeout", 15)
+    return _orig_session_request(self, method, url, **kwargs)
+
+requests.Session.request = _session_request_with_timeout
 
 # ── In-memory job store ─────────────────────────────────────────────────────────
 # { job_id: { "status": "running"|"done"|"error",
