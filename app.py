@@ -18,16 +18,26 @@ import numpy as np
 from flask import Flask, render_template, request, jsonify
 import yfinance as yf
 
-# ── Force requests (used by yfinance/urllib3) to always timeout ─────────────────
-# socket.setdefaulttimeout is bypassed by urllib3; monkey-patching Session.request
-# is the only reliable way to enforce a timeout on all yfinance HTTP calls.
-_orig_session_request = requests.Session.request
+# ── Force HTTP timeouts on every yfinance network call ─────────────────────────
+# yfinance >= 1.x uses curl_cffi (NOT standard requests) to bypass anti-bot.
+# We patch BOTH libraries so no underlying HTTP call can hang indefinitely.
+HTTP_TIMEOUT = 8
 
-def _session_request_with_timeout(self, method, url, **kwargs):
-    kwargs.setdefault("timeout", 8)
-    return _orig_session_request(self, method, url, **kwargs)
+_orig_requests_request = requests.Session.request
+def _requests_request_with_timeout(self, method, url, **kwargs):
+    kwargs.setdefault("timeout", HTTP_TIMEOUT)
+    return _orig_requests_request(self, method, url, **kwargs)
+requests.Session.request = _requests_request_with_timeout
 
-requests.Session.request = _session_request_with_timeout
+try:
+    from curl_cffi import requests as curl_requests
+    _orig_curl_request = curl_requests.Session.request
+    def _curl_request_with_timeout(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return _orig_curl_request(self, method, url, **kwargs)
+    curl_requests.Session.request = _curl_request_with_timeout
+except ImportError:
+    pass
 
 # ── In-memory job store ─────────────────────────────────────────────────────────
 # { job_id: { "status": "running"|"done"|"error",
