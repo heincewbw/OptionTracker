@@ -491,6 +491,7 @@
   let jobNotFoundRetries = 0;
   let scanStartTime      = null;
   let elapsedTimer       = null;
+  let lastGoodPoll       = null;   // last valid poll response, used for force-load
 
   // ── Toggle "How it works" ────────────────────────────────────────────────────
   function toggleHow() {
@@ -529,6 +530,7 @@
     allResults  = [];
     seenLogs    = 0;
     currentJob  = null;
+    lastGoodPoll = null;
     scanStartTime = Date.now();
     if (elapsedTimer) clearInterval(elapsedTimer);
     elapsedTimer = setInterval(() => {
@@ -540,21 +542,15 @@
         document.getElementById('etaText').textContent = `Auto-load in ~${remaining}s if still running`;
       } else if (remaining <= 0) {
         document.getElementById('etaText').textContent = 'Terminating stragglers — loading results…';
-        // Force-load directly from here in case pollTimer was lost
+        // Force-load using last good poll data — no re-fetch to avoid Railway multi-instance mismatch
         if (currentJob) {
           clearInterval(elapsedTimer); elapsedTimer = null;
           if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-          const jobId = currentJob;
-          currentJob = null;  // prevent double-trigger
-          fetch('/api/scan/status/' + jobId)
-            .then(r => r.json())
-            .then(d => {
-              d.status    = 'done';
-              d.processed = d.total;
-              d.count     = (d.results || []).length;
-              onComplete(d);
-            })
-            .catch(() => onComplete({ status:'done', results:[], count:0, total:0, processed:0 }));
+          currentJob = null;
+          const d = lastGoodPoll || { status:'done', results:[], count:0, total:0, processed:0 };
+          d.status    = 'done';
+          d.processed = d.total;
+          onComplete(d);
         }
       }
     }, 1000);
@@ -589,6 +585,7 @@
           return;
         }
         jobNotFoundRetries = 0;
+        lastGoodPoll = d;   // save every valid response
 
         // Update progress bar
         document.getElementById('progressBar').style.width = d.pct + '%';
