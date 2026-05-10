@@ -314,7 +314,7 @@ def scan_start():
         for sym in tickers:
             tq.put(sym)
 
-        NUM_WORKERS = 3   # keep thread count low on Railway
+        NUM_WORKERS = 10   # Railway handles this fine
         TICKER_TIMEOUT = 10  # hard per-ticker wall clock limit (s)
 
         def thread_worker():

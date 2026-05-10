@@ -489,10 +489,9 @@
   let currentJob         = null;
   let seenLogs           = 0;
   let jobNotFoundRetries = 0;
-  let pollFailStreak     = 0;    // consecutive network-level failures
   let scanStartTime      = null;
   let elapsedTimer       = null;
-  let lastGoodPoll       = null;   // last valid poll response, used for force-load
+  let lastGoodPoll       = null;
 
   // ── Toggle "How it works" ────────────────────────────────────────────────────
   function toggleHow() {
@@ -532,7 +531,6 @@
     seenLogs     = 0;
     currentJob   = null;
     lastGoodPoll = null;
-    pollFailStreak = 0;
     scanStartTime = Date.now();
     if (elapsedTimer) clearInterval(elapsedTimer);
     elapsedTimer = setInterval(() => {
@@ -544,15 +542,23 @@
         document.getElementById('etaText').textContent = `Auto-load in ~${remaining}s if still running`;
       } else if (remaining <= 0) {
         document.getElementById('etaText').textContent = 'Terminating stragglers — loading results…';
-        // Force-load using last good poll data — no re-fetch to avoid Railway multi-instance mismatch
         if (currentJob) {
           clearInterval(elapsedTimer); elapsedTimer = null;
           if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          const jobId = currentJob;
           currentJob = null;
-          const d = lastGoodPoll || { status:'done', results:[], count:0, total:0, processed:0 };
-          d.status    = 'done';
-          d.processed = d.total;
-          onComplete(d);
+          if (lastGoodPoll) {
+            // use cached poll data — no extra network hop needed
+            lastGoodPoll.status    = 'done';
+            lastGoodPoll.processed = lastGoodPoll.total;
+            onComplete(lastGoodPoll);
+          } else {
+            // no successful poll yet — try a fresh fetch
+            fetch('/api/scan/status/' + jobId)
+              .then(r => r.json())
+              .then(d => { d.status = 'done'; d.processed = d.total; onComplete(d); })
+              .catch(() => onComplete({ status:'done', results:[], count:0, total:0, processed:0 }));
+          }
         }
       }
     }, 1000);
@@ -587,8 +593,7 @@
           return;
         }
         jobNotFoundRetries = 0;
-        pollFailStreak     = 0;
-        lastGoodPoll = d;   // save every valid response
+        lastGoodPoll = d;
 
         // Update progress bar
         document.getElementById('progressBar').style.width = d.pct + '%';
@@ -619,19 +624,7 @@
           onComplete(d);
         }
       })
-      .catch(() => {
-        pollFailStreak++;
-        if (pollFailStreak >= 8) {
-          // 8 consecutive network failures — force-load whatever we have
-          clearInterval(pollTimer); pollTimer = null;
-          if (lastGoodPoll) {
-            lastGoodPoll.status = 'done';
-            onComplete(lastGoodPoll);
-          } else {
-            document.getElementById('progText').textContent = 'Network error — retrying…';
-          }
-        }
-      });
+      .catch(() => { /* transient network error, keep retrying */ });
   }
 
   // ── Scan complete ────────────────────────────────────────────────────────────
