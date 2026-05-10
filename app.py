@@ -331,9 +331,9 @@ def scan_start():
             threading.Thread(target=_run, daemon=True).start()
 
         collected  = set()
-        deadline   = time.monotonic() + 60   # absolute 60s cap
+        deadline   = time.monotonic() + 45   # absolute 45s cap
         last_tick  = time.monotonic()
-        STALL      = 8                        # 8s without any ticker = done
+        STALL      = 5                        # 5s without any ticker = give up on stragglers
 
         while len(collected) < len(tickers):
             now = time.monotonic()
@@ -356,16 +356,24 @@ def scan_start():
                     "pct":   round(job["processed"] / job["total"] * 100),
                 })
 
-        # Mark skipped tickers
+        # Mark skipped tickers — terminate stragglers and load whatever we have
         with job["lock"]:
-            for sym in tickers:
-                if sym not in collected:
-                    job["processed"] += 1
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": 0,
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
+            skipped = [s for s in tickers if s not in collected]
+            for sym in skipped:
+                job["processed"] += 1
+                job["log"].append({
+                    "sym":   sym,
+                    "found": 0,
+                    "pct":   round(job["processed"] / job["total"] * 100),
+                })
+            if skipped:
+                job["log"].append({
+                    "sym":   f"[{len(skipped)} skipped — timeout]",
+                    "found": 0,
+                    "pct":   100,
+                })
+            # Ensure progress reaches 100% even if accounting drifted
+            job["processed"] = job["total"]
             job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True)
@@ -383,12 +391,19 @@ def scan_status(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    # Safety net: force done after 75s in case worker thread itself hung
+    # Safety net: force done after 50s in case worker thread itself hung.
+    # Always load whatever data has been collected so far.
     if job["status"] == "running":
         elapsed = time.monotonic() - job.get("started_at", time.monotonic())
-        if elapsed > 75:
+        if elapsed > 50:
             with job["lock"]:
                 if job["status"] == "running":   # re-check inside lock
+                    job["log"].append({
+                        "sym":   "[force-terminated — loading partial results]",
+                        "found": 0,
+                        "pct":   100,
+                    })
+                    job["processed"] = job["total"]
                     job["results"].sort(
                         key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                         reverse=True)

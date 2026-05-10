@@ -377,6 +377,10 @@
       <div class="progress mb-3">
         <div id="progressBar" class="progress-bar" style="width:0%"></div>
       </div>
+      <div class="d-flex justify-content-between align-items-center mb-2" style="font-size:.78rem;color:var(--txt2)">
+        <span id="elapsedText"></span>
+        <span id="etaText" style="color:var(--yellow)"></span>
+      </div>
       <div id="scanLog" class="scan-log"></div>
     </div>
   </div>
@@ -485,6 +489,8 @@
   let currentJob         = null;
   let seenLogs           = 0;
   let jobNotFoundRetries = 0;
+  let scanStartTime      = null;
+  let elapsedTimer       = null;
 
   // ── Toggle "How it works" ────────────────────────────────────────────────────
   function toggleHow() {
@@ -515,12 +521,27 @@
     show('progressPanel'); hide('statsRow'); hide('resultsPanel'); hide('emptyState');
     document.getElementById('scanLog').innerHTML   = '';
     document.getElementById('progressBar').style.width = '0%';
+    document.getElementById('elapsedText').textContent = '';
+    document.getElementById('etaText').textContent     = '';
     document.getElementById('liveDot').classList.remove('d-none');
     if (dataTable) { dataTable.destroy(); dataTable = null; }
     document.getElementById('resultsBody').innerHTML = '';
     allResults  = [];
     seenLogs    = 0;
     currentJob  = null;
+    scanStartTime = Date.now();
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = setInterval(() => {
+      const sec = Math.floor((Date.now() - scanStartTime) / 1000);
+      document.getElementById('elapsedText').textContent = `⏱ ${sec}s elapsed`;
+      const TIMEOUT = 50;
+      const remaining = TIMEOUT - sec;
+      if (remaining > 0 && sec >= 5) {
+        document.getElementById('etaText').textContent = `Auto-load in ~${remaining}s if still running`;
+      } else if (remaining <= 0) {
+        document.getElementById('etaText').textContent = 'Terminating stragglers — loading results…';
+      }
+    }, 1000);
 
     fetch('/api/scan/start', {
       method:  'POST',
@@ -576,8 +597,23 @@
             d.status === 'done' ? 'Scan complete!' : 'Scanning…';
         }
 
-        if (d.status === 'done') {
+        // Client-side force-terminate: load whatever we have after 50s
+        const elapsed = (Date.now() - scanStartTime) / 1000;
+        if (d.status === 'done' || elapsed >= 50) {
           clearInterval(pollTimer); pollTimer = null;
+          if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+          // If server hasn't finished yet, use partial data from current poll
+          if (d.status !== 'done') {
+            d.status   = 'done';
+            d.results  = [];
+            d.processed = d.total;
+            // Trigger one final fetch to get accumulated results
+            fetch('/api/scan/status/' + currentJob)
+              .then(r => r.json())
+              .then(final => onComplete(final))
+              .catch(() => onComplete(d));
+            return;
+          }
           onComplete(d);
         }
       })
@@ -588,6 +624,7 @@
   function onComplete(d) {
     allResults = d.results;
     setBtnScanning(false);
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
     hide('progressPanel');
     document.getElementById('liveDot').classList.add('d-none');
 
@@ -611,6 +648,7 @@
   // ── Error ────────────────────────────────────────────────────────────────────
   function onError(msg) {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
     setBtnScanning(false);
     hide('progressPanel');
     document.getElementById('liveDot').classList.add('d-none');
