@@ -307,17 +307,21 @@ def scan_start():
 
     def worker():
         import time, queue as q_mod
-        job = JOBS[job_id]
-        rq  = q_mod.Queue()
+        job  = JOBS[job_id]
+        rq   = q_mod.Queue()
+        sema = threading.Semaphore(15)   # max 15 concurrent yfinance calls
 
         # Spawn each ticker as a daemon thread; results go into rq
         for sym in tickers:
             def _run(s=sym):
+                sema.acquire()
                 try:
                     res = process_ticker(s, min_mktcap, min_dte, max_dte,
                                         iv_hv_thr, iv_min, only_undervalued)
                 except Exception:
                     res = []
+                finally:
+                    sema.release()
                 rq.put((s, res))
             threading.Thread(target=_run, daemon=True).start()
 

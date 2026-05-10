@@ -624,22 +624,23 @@
 
   // ── Scan complete ────────────────────────────────────────────────────────────
   function onComplete(d) {
-    allResults = d.results;
+    const results = Array.isArray(d.results) ? d.results : [];
+    allResults = results;
     setBtnScanning(false);
     if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
     hide('progressPanel');
     document.getElementById('liveDot').classList.add('d-none');
 
     show('statsRow');
-    document.getElementById('statScanned').textContent = d.total;
-    document.getElementById('statFound').textContent   = d.count;
+    document.getElementById('statScanned').textContent = d.total || 0;
+    document.getElementById('statFound').textContent   = results.length;
 
-    if (d.results.length) {
-      const topIV    = Math.max(...d.results.map(r => r.iv));
-      const topRatio = Math.max(...d.results.map(r => r.iv_hv_ratio || 0));
+    if (results.length) {
+      const topIV    = Math.max(...results.map(r => r.iv));
+      const topRatio = Math.max(...results.map(r => r.iv_hv_ratio || 0));
       document.getElementById('statTopIV').textContent    = topIV + '%';
       document.getElementById('statTopRatio').textContent = topRatio > 0 ? topRatio.toFixed(2) + '×' : '—';
-      renderTable(d.results);
+      renderTable(results);
     } else {
       show('emptyState');
       document.getElementById('emptyState').querySelector('h5').textContent =
@@ -716,16 +717,20 @@
       tbody.appendChild(tr);
     });
 
-    dataTable = new DataTable('#resultsTable', {
-      pageLength: 25,
-      order:      [[12, 'desc']],    // sort by IV/HV ratio desc
-      responsive: false,
-      dom: '<"row mb-2 px-3"<"col-sm-6"l><"col-sm-6"f>>tip',
-      columnDefs: [
-        { targets: '_all', orderDataType: 'dom-data-order' },
-      ],
-      language: { search: '<i class="fas fa-search me-1 text-secondary"></i>' },
-    });
+    try {
+      dataTable = new DataTable('#resultsTable', {
+        pageLength: 25,
+        order:      [[12, 'desc']],
+        responsive: false,
+        dom: '<"row mb-2 px-3"<"col-sm-6"l><"col-sm-6"f>>tip',
+        columnDefs: [
+          { targets: '_all', orderDataType: 'dom-data-order' },
+        ],
+        language: { search: '<i class="fas fa-search me-1 text-secondary"></i>' },
+      });
+    } catch(e) {
+      console.error('DataTable init error:', e);
+    }
   }
 
   // ── Export CSV ───────────────────────────────────────────────────────────────
