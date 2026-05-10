@@ -489,6 +489,7 @@
   let currentJob         = null;
   let seenLogs           = 0;
   let jobNotFoundRetries = 0;
+  let pollFailStreak     = 0;    // consecutive network-level failures
   let scanStartTime      = null;
   let elapsedTimer       = null;
   let lastGoodPoll       = null;   // last valid poll response, used for force-load
@@ -527,10 +528,11 @@
     document.getElementById('liveDot').classList.remove('d-none');
     if (dataTable) { dataTable.destroy(); dataTable = null; }
     document.getElementById('resultsBody').innerHTML = '';
-    allResults  = [];
-    seenLogs    = 0;
-    currentJob  = null;
+    allResults   = [];
+    seenLogs     = 0;
+    currentJob   = null;
     lastGoodPoll = null;
+    pollFailStreak = 0;
     scanStartTime = Date.now();
     if (elapsedTimer) clearInterval(elapsedTimer);
     elapsedTimer = setInterval(() => {
@@ -585,6 +587,7 @@
           return;
         }
         jobNotFoundRetries = 0;
+        pollFailStreak     = 0;
         lastGoodPoll = d;   // save every valid response
 
         // Update progress bar
@@ -616,7 +619,19 @@
           onComplete(d);
         }
       })
-      .catch(() => { /* transient error, retry next tick */ });
+      .catch(() => {
+        pollFailStreak++;
+        if (pollFailStreak >= 8) {
+          // 8 consecutive network failures — force-load whatever we have
+          clearInterval(pollTimer); pollTimer = null;
+          if (lastGoodPoll) {
+            lastGoodPoll.status = 'done';
+            onComplete(lastGoodPoll);
+          } else {
+            document.getElementById('progText').textContent = 'Network error — retrying…';
+          }
+        }
+      });
   }
 
   // ── Scan complete ────────────────────────────────────────────────────────────

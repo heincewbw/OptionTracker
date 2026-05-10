@@ -307,23 +307,32 @@ def scan_start():
 
     def worker():
         import time, queue as q_mod
-        job  = JOBS[job_id]
-        rq   = q_mod.Queue()
-        sema = threading.Semaphore(15)   # max 15 concurrent yfinance calls
+        job   = JOBS[job_id]
+        tq    = q_mod.Queue()   # task queue
+        rq    = q_mod.Queue()   # result queue
 
-        # Spawn each ticker as a daemon thread; results go into rq
         for sym in tickers:
-            def _run(s=sym):
-                sema.acquire()
+            tq.put(sym)
+
+        NUM_WORKERS = 12  # bounded pool — safe on Railway
+
+        def thread_worker():
+            while True:
                 try:
-                    res = process_ticker(s, min_mktcap, min_dte, max_dte,
+                    sym = tq.get_nowait()
+                except q_mod.Empty:
+                    return
+                try:
+                    res = process_ticker(sym, min_mktcap, min_dte, max_dte,
                                         iv_hv_thr, iv_min, only_undervalued)
                 except Exception:
                     res = []
-                finally:
-                    sema.release()
-                rq.put((s, res))
-            threading.Thread(target=_run, daemon=True).start()
+                rq.put((sym, res))
+
+        threads = [threading.Thread(target=thread_worker, daemon=True)
+                   for _ in range(NUM_WORKERS)]
+        for t in threads:
+            t.start()
 
         collected = set()
         deadline  = time.monotonic() + 43   # hard 43s wall
@@ -335,7 +344,8 @@ def scan_start():
             try:
                 sym, res = rq.get(timeout=min(remaining_s, 0.5))
             except q_mod.Empty:
-                if time.monotonic() >= deadline:
+                # check if all threads are done
+                if not any(t.is_alive() for t in threads):
                     break
                 continue
             if sym in collected:
