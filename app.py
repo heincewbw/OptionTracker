@@ -20,7 +20,7 @@ import yfinance as yf
 # ── Force HTTP timeouts on every yfinance network call ─────────────────────────
 # yfinance >= 1.x uses curl_cffi (NOT standard requests) to bypass anti-bot.
 # We patch BOTH libraries so no underlying HTTP call can hang indefinitely.
-HTTP_TIMEOUT = 5
+HTTP_TIMEOUT = 3
 
 _orig_requests_request = requests.Session.request
 def _requests_request_with_timeout(self, method, url, **kwargs):
@@ -314,7 +314,8 @@ def scan_start():
         for sym in tickers:
             tq.put(sym)
 
-        NUM_WORKERS = 12  # bounded pool — safe on Railway
+        NUM_WORKERS = 3   # keep thread count low on Railway
+        TICKER_TIMEOUT = 10  # hard per-ticker wall clock limit (s)
 
         def thread_worker():
             while True:
@@ -322,11 +323,22 @@ def scan_start():
                     sym = tq.get_nowait()
                 except q_mod.Empty:
                     return
-                try:
-                    res = process_ticker(sym, min_mktcap, min_dte, max_dte,
-                                        iv_hv_thr, iv_min, only_undervalued)
-                except Exception:
-                    res = []
+                result_box = []
+                done_evt   = threading.Event()
+
+                def _fetch():
+                    try:
+                        res = process_ticker(sym, min_mktcap, min_dte, max_dte,
+                                            iv_hv_thr, iv_min, only_undervalued)
+                    except Exception:
+                        res = []
+                    result_box.append(res)
+                    done_evt.set()
+
+                t = threading.Thread(target=_fetch, daemon=True)
+                t.start()
+                done_evt.wait(timeout=TICKER_TIMEOUT)  # give up after 10s
+                res = result_box[0] if result_box else []
                 rq.put((sym, res))
 
         threads = [threading.Thread(target=thread_worker, daemon=True)
@@ -342,9 +354,8 @@ def scan_start():
             if remaining_s <= 0:
                 break
             try:
-                sym, res = rq.get(timeout=min(remaining_s, 0.5))
+                sym, res = rq.get(timeout=min(remaining_s, 1.0))
             except q_mod.Empty:
-                # check if all threads are done
                 if not any(t.is_alive() for t in threads):
                     break
                 continue
@@ -360,7 +371,7 @@ def scan_start():
                     "pct":   round(job["processed"] / job["total"] * 100),
                 })
 
-        # Finalize — always runs, regardless of how loop exited
+        # Finalize — always runs
         with job["lock"]:
             skipped_n = job["total"] - job["processed"]
             if skipped_n > 0:
