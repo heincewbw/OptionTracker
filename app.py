@@ -331,9 +331,9 @@ def scan_start():
             threading.Thread(target=_run, daemon=True).start()
 
         collected  = set()
-        deadline   = time.monotonic() + 45   # absolute 45s cap
+        deadline   = time.monotonic() + 13   # absolute 13s cap
         last_tick  = time.monotonic()
-        STALL      = 5                        # 5s without any ticker = give up on stragglers
+        STALL      = 3                        # 3s without any ticker = give up on stragglers
 
         while len(collected) < len(tickers):
             now = time.monotonic()
@@ -391,11 +391,11 @@ def scan_status(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    # Safety net: force done after 50s in case worker thread itself hung.
+    # Safety net: force done after 15s in case worker thread itself hung.
     # Always load whatever data has been collected so far.
     if job["status"] == "running":
         elapsed = time.monotonic() - job.get("started_at", time.monotonic())
-        if elapsed > 50:
+        if elapsed > 15:
             with job["lock"]:
                 if job["status"] == "running":   # re-check inside lock
                     job["log"].append({
