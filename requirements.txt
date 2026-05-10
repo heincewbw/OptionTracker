@@ -3,3 +3,4 @@ yfinance>=0.2.50
 numpy>=1.26.0
 pandas>=2.2.0
 gunicorn>=21.2.0
+curl_cffi>=0.7.0

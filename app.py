@@ -20,7 +20,7 @@ import yfinance as yf
 # ── Force HTTP timeouts on every yfinance network call ─────────────────────────
 # yfinance >= 1.x uses curl_cffi (NOT standard requests) to bypass anti-bot.
 # We patch BOTH libraries so no underlying HTTP call can hang indefinitely.
-HTTP_TIMEOUT = 8
+HTTP_TIMEOUT = 5
 
 _orig_requests_request = requests.Session.request
 def _requests_request_with_timeout(self, method, url, **kwargs):
@@ -315,69 +315,50 @@ def scan_start():
         return sym, res
 
     def worker():
-        import time, queue as q_mod
-        job  = JOBS[job_id]
-        rq   = q_mod.Queue()
+        import time
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        job = JOBS[job_id]
 
-        # Launch all tickers as daemon threads
-        for sym in tickers:
-            def _run(s=sym):
+        deadline = time.monotonic() + 13   # absolute 13s cap
+
+        futures = {}
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            for sym in tickers:
+                futures[pool.submit(_scan_ticker, sym)] = sym
+
+            for fut in as_completed(futures, timeout=13):
+                if time.monotonic() > deadline:
+                    break
+                sym = futures[fut]
                 try:
-                    res = process_ticker(s, min_mktcap, min_dte, max_dte,
-                                        iv_hv_thr, iv_min, only_undervalued)
+                    _, res = fut.result(timeout=0)
                 except Exception:
                     res = []
-                rq.put((s, res))
-            threading.Thread(target=_run, daemon=True).start()
+                with job["lock"]:
+                    job["processed"] += 1
+                    job["results"].extend(res)
+                    job["log"].append({
+                        "sym":   sym,
+                        "found": len(res),
+                        "pct":   round(job["processed"] / job["total"] * 100),
+                    })
 
-        collected  = set()
-        deadline   = time.monotonic() + 13   # absolute 13s cap
-        last_tick  = time.monotonic()
-        STALL      = 3                        # 3s without any ticker = give up on stragglers
-
-        while len(collected) < len(tickers):
-            now = time.monotonic()
-            if now - deadline > 0 or now - last_tick > STALL:
-                break
-            try:
-                sym, res = rq.get(timeout=0.5)
-            except q_mod.Empty:
-                continue
-            if sym in collected:
-                continue
-            collected.add(sym)
-            last_tick = time.monotonic()
-            with job["lock"]:
-                job["processed"] += 1
-                job["results"].extend(res)
-                job["log"].append({
-                    "sym":   sym,
-                    "found": len(res),
-                    "pct":   round(job["processed"] / job["total"] * 100),
-                })
-
-        # Mark skipped tickers — terminate stragglers and load whatever we have
+        # Finalize: mark remaining tickers as skipped, sort and cap results
         with job["lock"]:
-            skipped = [s for s in tickers if s not in collected]
-            for sym in skipped:
-                job["processed"] += 1
+            done_count = job["processed"]
+            skipped_n  = job["total"] - done_count
+            if skipped_n > 0:
                 job["log"].append({
-                    "sym":   sym,
-                    "found": 0,
-                    "pct":   round(job["processed"] / job["total"] * 100),
-                })
-            if skipped:
-                job["log"].append({
-                    "sym":   f"[{len(skipped)} skipped — timeout]",
+                    "sym":   f"[{skipped_n} skipped — timeout]",
                     "found": 0,
                     "pct":   100,
                 })
-            # Ensure progress reaches 100% even if accounting drifted
             job["processed"] = job["total"]
             job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True)
             job["results"] = job["results"][:50]
+            job["status"]  = "done"
             job["status"]  = "done"
 
     threading.Thread(target=worker, daemon=True).start()

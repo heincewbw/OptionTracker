@@ -540,6 +540,20 @@
         document.getElementById('etaText').textContent = `Auto-load in ~${remaining}s if still running`;
       } else if (remaining <= 0) {
         document.getElementById('etaText').textContent = 'Terminating stragglers — loading results…';
+        // Force-load directly from here in case pollTimer was lost
+        if (currentJob) {
+          clearInterval(elapsedTimer); elapsedTimer = null;
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+          fetch('/api/scan/status/' + currentJob)
+            .then(r => r.json())
+            .then(d => {
+              d.status    = 'done';
+              d.processed = d.total;
+              onComplete(d);
+            })
+            .catch(() => onComplete({ status:'done', results:[], count:0, total:0, processed:0 }));
+          currentJob = null;  // prevent double-trigger
+        }
       }
     }, 1000);
 
@@ -597,16 +611,9 @@
             d.status === 'done' ? 'Scan complete!' : 'Scanning…';
         }
 
-        // Client-side force-terminate: load whatever we have after 50s
-        const elapsed = (Date.now() - scanStartTime) / 1000;
-        if (d.status === 'done' || elapsed >= 15) {
+        if (d.status === 'done') {
           clearInterval(pollTimer); pollTimer = null;
           if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-          // Use results already in this poll response (server always returns them now)
-          if (d.status !== 'done') {
-            d.status    = 'done';
-            d.processed = d.total;
-          }
           onComplete(d);
         }
       })
