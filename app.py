@@ -301,90 +301,78 @@ def scan_start():
         "total":      len(tickers),
         "log":        [],
         "results":    [],
+        "lock":       threading.Lock(),
         "started_at": __import__("time").monotonic(),
     }
 
+    def _scan_ticker(sym):
+        """Run in its own daemon thread. Always puts to queue."""
+        try:
+            res = process_ticker(sym, min_mktcap, min_dte, max_dte,
+                                 iv_hv_thr, iv_min, only_undervalued)
+        except Exception:
+            res = []
+        return sym, res
+
     def worker():
         import time, queue as q_mod
-        job          = JOBS[job_id]
-        rq           = q_mod.Queue()
-        TOTAL_TIMEOUT = 45   # absolute hard cap — scan WILL finish within 45s
-        STALL_TIMEOUT = 5    # bail if no ticker arrives for 5s
+        job  = JOBS[job_id]
+        rq   = q_mod.Queue()
 
+        # Launch all tickers as daemon threads
         for sym in tickers:
             def _run(s=sym):
                 try:
-                    res = process_ticker(
-                        s, min_mktcap, min_dte, max_dte,
-                        iv_hv_thr, iv_min, only_undervalued)
+                    res = process_ticker(s, min_mktcap, min_dte, max_dte,
+                                        iv_hv_thr, iv_min, only_undervalued)
                 except Exception:
                     res = []
                 rq.put((s, res))
             threading.Thread(target=_run, daemon=True).start()
 
-        collected: set = set()
-        deadline      = time.monotonic() + TOTAL_TIMEOUT
-        last_received = time.monotonic()
+        collected  = set()
+        deadline   = time.monotonic() + 60   # absolute 60s cap
+        last_tick  = time.monotonic()
+        STALL      = 8                        # 8s without any ticker = done
 
         while len(collected) < len(tickers):
             now = time.monotonic()
-            if now >= deadline:
+            if now - deadline > 0 or now - last_tick > STALL:
                 break
-            if now - last_received >= STALL_TIMEOUT:
-                break   # no ticker arrived for 15s → release now
             try:
-                sym, res = rq.get(timeout=0.5)   # poll every 0.5s for responsive stall check
+                sym, res = rq.get(timeout=0.5)
             except q_mod.Empty:
                 continue
-
             if sym in collected:
                 continue
             collected.add(sym)
-            last_received = time.monotonic()   # reset stall timer
-            job["processed"] += 1
-            job["results"].extend(res)
-            job["log"].append({
-                "sym":   sym,
-                "found": len(res),
-                "pct":   round(job["processed"] / job["total"] * 100),
-            })
-
-        # Anything not yet collected → mark skipped immediately
-        for sym in tickers:
-            if sym not in collected:
+            last_tick = time.monotonic()
+            with job["lock"]:
                 job["processed"] += 1
+                job["results"].extend(res)
                 job["log"].append({
                     "sym":   sym,
-                    "found": 0,
+                    "found": len(res),
                     "pct":   round(job["processed"] / job["total"] * 100),
                 })
 
-        job["results"].sort(
-            key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-            reverse=True)
-        job["results"] = job["results"][:50]
-
-    def _watchdog():
-        import time
-        time.sleep(60)
-        j = JOBS.get(job_id, {})
-        if j.get("status") != "done":
-            j.get("results", []).sort(
+        # Mark skipped tickers
+        with job["lock"]:
+            for sym in tickers:
+                if sym not in collected:
+                    job["processed"] += 1
+                    job["log"].append({
+                        "sym":   sym,
+                        "found": 0,
+                        "pct":   round(job["processed"] / job["total"] * 100),
+                    })
+            job["results"].sort(
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True)
-            j["results"] = j.get("results", [])[:50]
-            j["status"]  = "done"
+            job["results"] = job["results"][:50]
+            job["status"]  = "done"
 
-    def _run_worker():
-        try:
-            worker()
-        except Exception as e:
-            logger.warning("worker crashed: %s", e)
-        finally:
-            JOBS[job_id]["status"] = "done"
-
-    threading.Thread(target=_run_worker, daemon=True).start()
-    threading.Thread(target=_watchdog,   daemon=True).start()
+    threading.Thread(target=worker, daemon=True).start()
     return jsonify({"job_id": job_id, "total": len(tickers)})
 
 
@@ -395,25 +383,34 @@ def scan_status(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    # Force-complete if job has been running more than 60s — catches any
-    # scenario where the background worker or watchdog failed to set "done".
+    # Safety net: force done after 75s in case worker thread itself hung
     if job["status"] == "running":
         elapsed = time.monotonic() - job.get("started_at", time.monotonic())
-        if elapsed > 60:
-            job["results"].sort(
-                key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
-                reverse=True)
-            job["results"] = job["results"][:50]
-            job["status"] = "done"
+        if elapsed > 75:
+            with job["lock"]:
+                if job["status"] == "running":   # re-check inside lock
+                    job["results"].sort(
+                        key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
+                        reverse=True)
+                    job["results"] = job["results"][:50]
+                    job["status"] = "done"
+
+    with job["lock"]:
+        status    = job["status"]
+        processed = job["processed"]
+        total     = job["total"]
+        log       = list(job["log"][-30:])
+        count     = len(job["results"])
+        results   = list(job["results"]) if status == "done" else []
 
     return jsonify({
-        "status":    job["status"],
-        "processed": job["processed"],
-        "total":     job["total"],
-        "pct":       round(job["processed"] / job["total"] * 100) if job["total"] else 0,
-        "log":       job["log"][-30:],
-        "count":     len(job["results"]),
-        "results":   job["results"] if job["status"] == "done" else [],
+        "status":    status,
+        "processed": processed,
+        "total":     total,
+        "pct":       round(processed / total * 100) if total else 0,
+        "log":       log,
+        "count":     count,
+        "results":   results,
     })
 
 
