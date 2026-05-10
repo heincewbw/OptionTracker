@@ -602,17 +602,10 @@
         if (d.status === 'done' || elapsed >= 50) {
           clearInterval(pollTimer); pollTimer = null;
           if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
-          // If server hasn't finished yet, use partial data from current poll
+          // Use results already in this poll response (server always returns them now)
           if (d.status !== 'done') {
-            d.status   = 'done';
-            d.results  = [];
+            d.status    = 'done';
             d.processed = d.total;
-            // Trigger one final fetch to get accumulated results
-            fetch('/api/scan/status/' + currentJob)
-              .then(r => r.json())
-              .then(final => onComplete(final))
-              .catch(() => onComplete(d));
-            return;
           }
           onComplete(d);
         }

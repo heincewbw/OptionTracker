@@ -416,7 +416,7 @@ def scan_status(job_id):
         total     = job["total"]
         log       = list(job["log"][-30:])
         count     = len(job["results"])
-        results   = list(job["results"]) if status == "done" else []
+        results   = list(job["results"])  # always return, client handles partial
 
     return jsonify({
         "status":    status,
