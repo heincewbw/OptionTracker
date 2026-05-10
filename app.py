@@ -305,48 +305,50 @@ def scan_start():
         "started_at": __import__("time").monotonic(),
     }
 
-    def _scan_ticker(sym):
-        """Run in its own daemon thread. Always puts to queue."""
-        try:
-            res = process_ticker(sym, min_mktcap, min_dte, max_dte,
-                                 iv_hv_thr, iv_min, only_undervalued)
-        except Exception:
-            res = []
-        return sym, res
-
     def worker():
-        import time
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time, queue as q_mod
         job = JOBS[job_id]
+        rq  = q_mod.Queue()
 
-        deadline = time.monotonic() + 13   # absolute 13s cap
-
-        futures = {}
-        with ThreadPoolExecutor(max_workers=20) as pool:
-            for sym in tickers:
-                futures[pool.submit(_scan_ticker, sym)] = sym
-
-            for fut in as_completed(futures, timeout=13):
-                if time.monotonic() > deadline:
-                    break
-                sym = futures[fut]
+        # Spawn each ticker as a daemon thread; results go into rq
+        for sym in tickers:
+            def _run(s=sym):
                 try:
-                    _, res = fut.result(timeout=0)
+                    res = process_ticker(s, min_mktcap, min_dte, max_dte,
+                                        iv_hv_thr, iv_min, only_undervalued)
                 except Exception:
                     res = []
-                with job["lock"]:
-                    job["processed"] += 1
-                    job["results"].extend(res)
-                    job["log"].append({
-                        "sym":   sym,
-                        "found": len(res),
-                        "pct":   round(job["processed"] / job["total"] * 100),
-                    })
+                rq.put((s, res))
+            threading.Thread(target=_run, daemon=True).start()
 
-        # Finalize: mark remaining tickers as skipped, sort and cap results
+        collected = set()
+        deadline  = time.monotonic() + 12   # hard 12s wall
+
+        while len(collected) < len(tickers):
+            remaining_s = deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            try:
+                sym, res = rq.get(timeout=min(remaining_s, 0.5))
+            except q_mod.Empty:
+                if time.monotonic() >= deadline:
+                    break
+                continue
+            if sym in collected:
+                continue
+            collected.add(sym)
+            with job["lock"]:
+                job["processed"] += 1
+                job["results"].extend(res)
+                job["log"].append({
+                    "sym":   sym,
+                    "found": len(res),
+                    "pct":   round(job["processed"] / job["total"] * 100),
+                })
+
+        # Finalize — always runs, regardless of how loop exited
         with job["lock"]:
-            done_count = job["processed"]
-            skipped_n  = job["total"] - done_count
+            skipped_n = job["total"] - job["processed"]
             if skipped_n > 0:
                 job["log"].append({
                     "sym":   f"[{skipped_n} skipped — timeout]",
@@ -358,7 +360,6 @@ def scan_start():
                 key=lambda x: x.get("iv_hv_ratio") or (x.get("iv", 0) / 100),
                 reverse=True)
             job["results"] = job["results"][:50]
-            job["status"]  = "done"
             job["status"]  = "done"
 
     threading.Thread(target=worker, daemon=True).start()

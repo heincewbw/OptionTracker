@@ -544,15 +544,17 @@
         if (currentJob) {
           clearInterval(elapsedTimer); elapsedTimer = null;
           if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-          fetch('/api/scan/status/' + currentJob)
+          const jobId = currentJob;
+          currentJob = null;  // prevent double-trigger
+          fetch('/api/scan/status/' + jobId)
             .then(r => r.json())
             .then(d => {
               d.status    = 'done';
               d.processed = d.total;
+              d.count     = (d.results || []).length;
               onComplete(d);
             })
             .catch(() => onComplete({ status:'done', results:[], count:0, total:0, processed:0 }));
-          currentJob = null;  // prevent double-trigger
         }
       }
     }, 1000);
